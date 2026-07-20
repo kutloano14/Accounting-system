@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Register - Accounting MVP</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,700&family=Space+Grotesk:wght@400;500;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/static/css/app.css?v=15" />
+</head>
+<body>
+  <div class="bg-shape one"></div>
+  <div class="bg-shape two"></div>
+
+  <div class="auth-container">
+    <div class="auth-card">
+      <h1>Register</h1>
+      <form id="registerForm">
+        <div class="form-group">
+          <label for="full_name">Full Name</label>
+          <input type="text" id="full_name" name="full_name" required />
+        </div>
+        <div class="form-group">
+          <label for="email">Email</label>
+          <input type="email" id="email" name="email" required />
+        </div>
+        <div class="form-group">
+          <label for="password">Password</label>
+          <input type="password" id="password" name="password" required />
+        </div>
+        <div class="form-group">
+          <label for="confirm_password">Confirm Password</label>
+          <input type="password" id="confirm_password" name="confirm_password" required />
+        </div>
+        <button type="submit" class="btn btn-primary">Register</button>
+      </form>
+      <p class="auth-link">Already have an account? <a href="/login">Login here</a></p>
+    </div>
+  </div>
+
+  <script>
+    async function getCurrentUser() {
+      try {
+        const res = await fetch('/auth/me', { credentials: 'same-origin' });
+        if (!res.ok) return null;
+        return await res.json();
+      } catch (error) {
+        return null;
+      }
+    }
+
+    getCurrentUser().then((user) => {
+      if (user) {
+        window.location.href = '/';
+      }
+    });
+
+    document.getElementById('registerForm').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const formData = new FormData(e.target);
+      const password = formData.get('password');
+      const confirmPassword = formData.get('confirm_password');
+
+      if (password !== confirmPassword) {
+        alert('Passwords do not match');
+        return;
+      }
+
+      const data = {
+        full_name: formData.get('full_name'),
+        email: formData.get('email'),
+        password: password
+      };
+
+      try {
+        const response = await fetch('/auth/register', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify(data)
+        });
+
+        if (response.ok) {
+          alert('Registration successful! Please login.');
+          window.location.href = '/login';
+        } else {
+          const error = await response.json();
+          alert(error.detail || 'Registration failed');
+        }
+      } catch (error) {
+        alert('An error occurred. Please try again.');
+      }
+    });
+  </script>
+</body>
+</html>

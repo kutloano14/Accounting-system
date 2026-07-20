@@ -1,0 +1,6 @@
+date,description,amount,reference,currency
+2026-03-01,Uber Trip,-24.50,TXN-1,USD
+2026-03-02,Stripe Payout,500.00,TXN-2,USD
+2026-03-03,Bank Fee,-10.00,TXN-3,USD
+2026-03-04,Office Depot,-120.00,TXN-4,USD
+/

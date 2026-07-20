@@ -1,0 +1,518 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Accounting MVP Dashboard</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,700&family=Space+Grotesk:wght@400;500;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/static/css/app.css?v=15" />
+</head>
+<body>
+  <div class="bg-shape one"></div>
+  <div class="bg-shape two"></div>
+
+  <header class="hero">
+    <div>
+      <p class="eyebrow">Bookkeeping Automation</p>
+      <h1>Accounting Control Room</h1>
+      <p class="subtitle">Import statements, auto-allocate transactions, post journals, and review reports from one place.</p>
+      <div class="form-grid" style="margin-top: 0.6rem; max-width: 760px;">
+        <select id="activeCompanyId"></select>
+        <input id="newCompanyName" placeholder="New company name" />
+        <button id="createCompanyBtn" class="btn btn-ghost">Create Company</button>
+        <button id="deleteCompanyBtn" class="btn btn-ghost">Delete Selected Company</button>
+      </div>
+    </div>
+    <div class="actions">
+      <button id="seedAllBtn" class="btn btn-primary">Seed Whole Project</button>
+    </div>
+    <div class="auth-bar" style="display:flex;justify-content:flex-end;align-items:center;gap:0.75rem;margin-top:1rem;">
+      <div id="currentUserInfo" style="color:#fff;font-weight:600;">Checking login...</div>
+      <button id="logoutBtn" class="btn btn-ghost" type="button">Logout</button>
+    </div>
+  </header>
+
+  <main class="grid">
+    <section class="card" id="importCard">
+      <h2>1. Import Bank Statement</h2>
+      <p class="muted">Upload CSV with headers: date, description, amount, reference, currency.</p>
+      <div class="form-grid" style="margin-bottom: 0.6rem;">
+        <select id="importDateFormat">
+          <option value="">Date format: Auto detect</option>
+          <option value="yyyy-mm-dd">YYYY-MM-DD</option>
+          <option value="yyyy/mm/dd">YYYY/MM/DD</option>
+          <option value="dd/mm/yyyy">DD/MM/YYYY</option>
+          <option value="mm/dd/yyyy">MM/DD/YYYY</option>
+          <option value="dd-mm-yyyy">DD-MM-YYYY</option>
+        </select>
+        <select id="importAmountMode">
+          <option value="auto">Amount mode: Auto detect</option>
+          <option value="signed_amount">Single amount column (+/-)</option>
+          <option value="debit_credit">Debit and Credit columns</option>
+        </select>
+      </div>
+      <div class="form-grid" style="margin-bottom: 0.6rem;">
+        <input id="openingBalanceDate" type="date" />
+        <input id="openingBalanceAmount" type="number" step="0.01" placeholder="Opening balance" />
+        <input id="openingBalanceNote" placeholder="Opening balance note" />
+        <label style="display:flex;align-items:center;gap:0.35rem;">
+          <input id="openingBalanceUseSuggested" type="checkbox" />
+          Use first transaction date
+        </label>
+        <button id="setOpeningBalanceBtn" class="btn btn-ghost">Set Opening Balance</button>
+      </div>
+      <div class="actions" style="margin-bottom: 0.6rem;">
+        <button id="loadBalanceSummaryBtn" class="btn btn-ghost">Load Balance Summary</button>
+        <button id="loadRunningBalanceBtn" class="btn btn-ghost">Load Running Balance</button>
+      </div>
+      <input type="file" id="bankFile" accept=".csv" />
+      <button id="importBtn" class="btn">Import CSV</button>
+      <pre id="importOut" class="output"></pre>
+      <div id="runningBalanceOut" class="table-wrap"></div>
+    </section>
+
+    <section class="card" id="rulesCard">
+      <h2>2. Allocation Rules</h2>
+      <div class="form-grid">
+        <input id="ruleName" placeholder="Rule name" />
+        <input id="ruleKeyword" placeholder="Keyword (e.g. uber)" />
+        <select id="ruleAccountId">
+          <option value="">Select account</option>
+        </select>
+        <input id="rulePriority" type="number" placeholder="Priority" value="100" />
+      </div>
+      <button id="addRuleBtn" class="btn">Add Rule</button>
+      <button id="loadAccountsBtn" class="btn btn-ghost">Load Accounts</button>
+      <button id="refreshRulesBtn" class="btn btn-ghost">Refresh Rules</button>
+      <div class="form-grid" style="margin-top: 0.6rem;">
+        <input id="deleteRuleId" type="number" placeholder="Rule ID to delete" />
+        <button id="deleteRuleBtn" class="btn btn-ghost">Delete Rule</button>
+      </div>
+      <div id="rulesOut" class="table-wrap"></div>
+    </section>
+
+    <section class="card" id="accountsCard">
+      <h2>Account Management</h2>
+      <p class="muted">Create your own accounts and delete unused sample ones.</p>
+      <div class="form-grid">
+        <input id="accountCode" placeholder="Code (e.g. 5300)" />
+        <input id="accountName" placeholder="Name (e.g. Marketing Expense)" />
+        <select id="accountCategory">
+          <option value="Asset">Asset</option>
+          <option value="Liability">Liability</option>
+          <option value="Equity">Equity</option>
+          <option value="Income">Income</option>
+          <option value="Expense" selected>Expense</option>
+        </select>
+        <input id="accountVatRate" type="number" step="0.01" min="0" max="100" placeholder="VAT % (e.g. 15)" value="0" />
+        <button id="addAccountBtn" class="btn">Add Account</button>
+      </div>
+      <div class="form-grid" style="margin-top: 0.6rem;">
+        <select id="accountManageSelect">
+          <option value="">Select account to delete</option>
+        </select>
+        <button id="deleteAccountBtn" class="btn btn-ghost">Delete Selected Account</button>
+      </div>
+      <div class="actions" style="margin-top: 0.6rem;">
+        <button id="refreshAccountsBtn" class="btn btn-ghost">Load Accounts</button>
+        <button id="toggleAccountsTableBtn" class="btn btn-ghost">Hide Accounts</button>
+      </div>
+      <div id="accountsOut" class="table-wrap is-hidden"></div>
+    </section>
+
+    <section class="card" id="processCard">
+      <h2>3. Bookkeeping Run</h2>
+      <div class="actions">
+        <button id="allocateBtn" class="btn">Allocate</button>
+        <button id="postBtn" class="btn btn-primary">Post Journals</button>
+        <button id="fullRunBtn" class="btn btn-ghost">Run Full Flow</button>
+      </div>
+      <pre id="processOut" class="output"></pre>
+    </section>
+
+    <section class="card" id="unmatchedCard">
+      <h2>Reconciliation Queue</h2>
+      <p class="muted">Transactions that need manual mapping.</p>
+      <button id="loadUnmatchedBtn" class="btn btn-ghost">Load Unmatched</button>
+      <div id="unmatchedOut" class="table-wrap"></div>
+    </section>
+
+    <section class="card" id="transactionsCard">
+      <h2>Imported Transactions</h2>
+      <p class="muted">See imported records, status, and income/expense hint.</p>
+      <div class="form-grid" style="margin-bottom: 0.6rem;">
+        <input id="txnEditId" type="number" placeholder="Transaction ID" readonly />
+        <input id="txnDate" type="date" />
+        <input id="txnDescription" placeholder="Description" />
+        <input id="txnAmount" type="number" step="0.01" placeholder="Amount (+inflow, -outflow)" />
+        <input id="txnCurrency" value="USD" placeholder="Currency" />
+        <input id="txnReference" placeholder="Reference" />
+        <select id="txnAccountId">
+          <option value="">Assigned account (optional)</option>
+        </select>
+        <button id="addTransactionBtn" class="btn">Add Transaction</button>
+        <button id="updateTransactionBtn" class="btn btn-ghost">Update Selected</button>
+        <button id="clearTransactionFormBtn" class="btn btn-ghost">Clear Form</button>
+      </div>
+      <div class="form-grid" style="margin-bottom: 0.6rem;">
+        <input id="transactionSearch" placeholder="Search description/reference" />
+        <select id="transactionAccountFilter">
+          <option value="">All accounts</option>
+        </select>
+        <input id="transactionFromDate" type="date" placeholder="From date" />
+        <input id="transactionToDate" type="date" placeholder="To date" />
+        <button id="filterTransactionsBtn" class="btn btn-ghost">Search Transactions</button>
+        <button id="clearTransactionFiltersBtn" class="btn btn-ghost">Clear Filter</button>
+      </div>
+      <div class="actions" style="margin-bottom: 0.6rem;">
+        <button id="downloadFilteredTransactionsBtn" class="btn btn-ghost">Download Filtered Transactions</button>
+        <span id="transactionsTotal" class="muted">Total: 0.00</span>
+        <span id="transactionsSearchSummary" class="muted"></span>
+      </div>
+      <button id="loadTransactionsBtn" class="btn btn-ghost">Load Transactions</button>
+      <button id="loadHintsBtn" class="btn btn-ghost">Load Loan/Tax/Interest Hints</button>
+      <div id="transactionsOut" class="table-wrap"></div>
+    </section>
+
+    <section class="card card-wide" id="invoicesCard">
+      <h2>Sales Invoices</h2>
+      <p class="muted">Create customer invoices, track statuses, and inspect invoice lines.</p>
+      <div class="form-grid" style="margin-bottom: 0.6rem;">
+        <input id="customerCode" placeholder="Customer code" />
+        <input id="customerName" placeholder="Customer name" />
+        <input id="customerEmail" placeholder="Customer email" />
+        <input id="customerPhone" placeholder="Customer phone" />
+        <button id="createCustomerBtn" class="btn btn-ghost">Create Customer</button>
+        <button id="loadCustomersBtn" class="btn btn-ghost">Load Customers</button>
+      </div>
+      <div class="form-grid" style="margin-bottom: 0.6rem;">
+        <input id="inventorySku" placeholder="Inventory SKU" />
+        <input id="inventoryName" placeholder="Inventory name" />
+        <input id="inventoryPrice" type="number" step="0.01" placeholder="Unit price" />
+        <input id="inventoryQty" type="number" step="0.01" placeholder="Qty on hand" />
+        <button id="createInventoryBtn" class="btn btn-ghost">Create Item</button>
+        <button id="loadInventoryBtn" class="btn btn-ghost">Load Items</button>
+      </div>
+      <div class="form-grid" style="margin-bottom: 0.6rem;">
+        <select id="invoiceCustomerId">
+          <option value="">Customer (optional)</option>
+        </select>
+        <input id="invoiceNumber" placeholder="Invoice number (optional auto)" />
+        <input id="invoiceCustomerName" placeholder="Customer name" />
+        <input id="invoiceCustomerEmail" placeholder="Customer email" />
+        <input id="invoiceIssueDate" type="date" />
+        <input id="invoiceDueDate" type="date" />
+        <input id="invoiceCurrency" placeholder="Currency" value="USD" />
+        <input id="invoiceNotes" placeholder="Notes (optional)" />
+      </div>
+      <div class="form-grid" style="margin-bottom: 0.6rem;">
+        <input id="invoiceLineDescription" placeholder="Line description" />
+        <input id="invoiceLineQty" type="number" step="0.01" value="1" placeholder="Quantity" />
+        <input id="invoiceLineUnitPrice" type="number" step="0.01" placeholder="Unit price" />
+        <input id="invoiceLineTaxRate" type="number" step="0.01" value="0" placeholder="Tax %" />
+        <select id="invoiceIncomeAccountId">
+          <option value="">Income account (optional)</option>
+        </select>
+        <select id="invoiceInventoryItemId">
+          <option value="">Inventory item (optional)</option>
+        </select>
+        <button id="addInvoiceLineBtn" class="btn btn-ghost">Add Line</button>
+        <button id="clearInvoiceLinesBtn" class="btn btn-ghost">Clear Lines</button>
+      </div>
+      <div id="invoiceDraftLinesOut" class="table-wrap"></div>
+      <div class="actions" style="margin-top: 0.6rem;">
+        <button id="createInvoiceBtn" class="btn">Create Invoice</button>
+        <button id="loadInvoicesBtn" class="btn btn-ghost">Load Invoices</button>
+      </div>
+      <div class="form-grid" style="margin-top: 0.6rem;">
+        <input id="invoiceSearch" placeholder="Search by customer or invoice number" />
+        <select id="invoiceStatusFilter">
+          <option value="">All statuses</option>
+          <option value="draft">Draft</option>
+          <option value="sent">Sent</option>
+          <option value="partial">Partial</option>
+          <option value="overdue">Overdue</option>
+          <option value="paid">Paid</option>
+        </select>
+        <button id="searchInvoicesBtn" class="btn btn-ghost">Search Invoices</button>
+      </div>
+      <div class="form-grid" style="margin-top: 0.6rem;">
+        <input id="invoicePaymentInvoiceId" type="number" placeholder="Invoice ID for payment" />
+        <input id="invoicePaymentDate" type="date" />
+        <input id="invoicePaymentAmount" type="number" step="0.01" placeholder="Payment amount" />
+        <input id="invoicePaymentReference" placeholder="Payment reference" />
+        <button id="addInvoicePaymentBtn" class="btn btn-ghost">Record Payment</button>
+      </div>
+      <div class="form-grid" style="margin-top: 0.6rem;">
+        <input id="recurringName" placeholder="Recurring template name" />
+        <select id="recurringFrequency">
+          <option value="monthly">Monthly</option>
+          <option value="weekly">Weekly</option>
+          <option value="quarterly">Quarterly</option>
+        </select>
+        <input id="recurringNextRun" type="date" />
+        <button id="createRecurringBtn" class="btn btn-ghost">Create Recurring</button>
+        <button id="runRecurringBtn" class="btn btn-ghost">Run Recurring Now</button>
+      </div>
+      <div class="actions" style="margin-top: 0.6rem;">
+        <button id="loadArAgingBtn" class="btn btn-ghost">Load AR Aging</button>
+        <button id="runInvoiceRemindersBtn" class="btn btn-ghost">Run Overdue Reminders</button>
+      </div>
+      <div class="form-grid" style="margin-top: 0.6rem;">
+        <input id="periodLockDate" type="date" />
+        <input id="periodLockNote" placeholder="Period lock note" />
+        <button id="savePeriodLockBtn" class="btn btn-ghost">Save Period Lock</button>
+        <button id="loadPeriodLockBtn" class="btn btn-ghost">Load Period Lock</button>
+      </div>
+      <div id="invoicesOut" class="table-wrap"></div>
+    </section>
+
+    <section class="card" id="assetsCard">
+      <h2>Fixed Assets</h2>
+      <p class="muted">Register company assets (car, machines, equipment) and track depreciation/book value.</p>
+      <div class="form-grid">
+        <input id="assetName" placeholder="Asset name (e.g. Company Car)" />
+        <input id="assetType" placeholder="Asset type" value="Vehicle" />
+        <input id="assetPurchaseDate" type="date" />
+        <input id="assetCost" type="number" step="0.01" placeholder="Cost" />
+        <input id="assetLifeYears" type="number" placeholder="Useful life years" value="5" />
+        <input id="assetSalvage" type="number" step="0.01" placeholder="Salvage value" value="0" />
+        <select id="assetAccountId">
+          <option value="">Asset account</option>
+        </select>
+        <select id="assetDepExpenseAccountId">
+          <option value="">Depreciation expense account</option>
+        </select>
+      </div>
+      <button id="addAssetBtn" class="btn">Add Asset</button>
+      <button id="loadAssetsBtn" class="btn btn-ghost">Load Assets</button>
+      <div id="assetsOut" class="table-wrap"></div>
+    </section>
+
+    <section class="card" id="loansCard">
+      <h2>Loans & Interest</h2>
+      <p class="muted">Capture loans and generate monthly principal/interest schedule.</p>
+      <div class="form-grid">
+        <input id="loanLender" placeholder="Lender name" />
+        <input id="loanPrincipal" type="number" step="0.01" placeholder="Principal" />
+        <input id="loanRate" type="number" step="0.01" placeholder="Annual interest %" value="15" />
+        <input id="loanStartDate" type="date" />
+        <input id="loanTermMonths" type="number" placeholder="Term months" value="24" />
+        <select id="loanLiabilityAccountId">
+          <option value="">Loan liability account</option>
+        </select>
+        <select id="loanInterestExpenseAccountId">
+          <option value="">Interest expense account</option>
+        </select>
+      </div>
+      <div class="actions">
+        <button id="addLoanBtn" class="btn">Add Loan</button>
+        <button id="loadLoansBtn" class="btn btn-ghost">Load Loans</button>
+        <button id="detectLoanHintsBtn" class="btn btn-ghost">Detect From Transactions</button>
+      </div>
+      <div class="form-grid" style="margin-top: 0.6rem;">
+        <input id="loanScheduleLoanId" type="number" placeholder="Loan ID for schedule" />
+        <input id="loanScheduleMonths" type="number" placeholder="Months to preview" value="12" />
+        <button id="loadLoanScheduleBtn" class="btn btn-ghost">Load Loan Schedule</button>
+      </div>
+      <div id="loansOut" class="table-wrap"></div>
+    </section>
+
+    <section class="card card-wide" id="payrollCard">
+      <h2>Payroll Management</h2>
+      <p class="muted">Manage employees and generate payroll runs per company.</p>
+
+      <div class="form-grid" style="margin-bottom: 0.6rem;">
+        <input id="payrollEmployeeCode" placeholder="Employee code (e.g. EMP501)" />
+        <input id="payrollEmployeeName" placeholder="Employee full name" />
+        <input id="payrollEmployeePhotoUrl" placeholder="Photo URL (optional)" />
+        <input id="payrollEmployeeIdNumber" placeholder="ID number" />
+        <input id="payrollEmployeeTaxNumber" placeholder="Tax number" />
+        <input id="payrollEmployeePosition" placeholder="Position" />
+        <input id="payrollEmployeeEmail" placeholder="Email" />
+        <input id="payrollEmployeePhone" placeholder="Phone" />
+        <input id="payrollEmployeeHireDate" type="date" />
+        <input id="payrollEmployeeBankAccount" placeholder="Bank account" />
+        <input id="payrollEmployeeNssa" placeholder="NSSA number" />
+        <input id="payrollEmployeePension" placeholder="Pension number" />
+        <input id="payrollEmployeeGross" type="number" step="0.01" placeholder="Gross salary" />
+        <input id="payrollEmployeeTaxRate" type="number" step="0.01" min="0" max="100" value="0" placeholder="Tax rate %" />
+        <button id="addPayrollEmployeeBtn" class="btn">Add Employee</button>
+        <button id="loadPayrollEmployeesBtn" class="btn btn-ghost">Load Employees</button>
+      </div>
+
+      <div class="form-grid" style="margin-bottom: 0.6rem;">
+        <input id="payrollEmployeeSearch" placeholder="Search employee by name or code" />
+        <button id="searchPayrollEmployeeBtn" class="btn btn-ghost">Search Employee</button>
+      </div>
+
+      <div class="form-grid" style="margin-bottom: 0.6rem;">
+        <input id="payrollDocEmployeeId" type="number" placeholder="Employee ID for docs" />
+        <select id="payrollDocType">
+          <option value="id">ID Copy</option>
+          <option value="tax">Tax Certificate</option>
+          <option value="contract">Employment Contract</option>
+          <option value="medical">Medical Aid</option>
+          <option value="education">Education Certificate</option>
+          <option value="other">Other</option>
+        </select>
+        <input id="payrollDocTitle" placeholder="Document title" />
+        <input id="payrollDocFile" type="file" />
+        <button id="uploadPayrollDocBtn" class="btn btn-ghost">Upload Doc</button>
+        <button id="loadPayrollDocVaultBtn" class="btn btn-ghost">Load Doc Vault</button>
+      </div>
+      <div id="payrollDocDropZone" class="drop-zone">Drag and drop a document here, or use the file picker above.</div>
+
+      <div class="form-grid" style="margin-bottom: 0.6rem;">
+        <input id="taxBracketLower" type="number" step="0.01" placeholder="Tax bracket lower" />
+        <input id="taxBracketUpper" type="number" step="0.01" placeholder="Tax bracket upper (blank = no limit)" />
+        <input id="taxBracketRate" type="number" step="0.01" min="0" max="100" placeholder="Rate %" />
+        <input id="taxBracketOrder" type="number" value="1" min="1" placeholder="Order" />
+        <button id="addTaxBracketBtn" class="btn btn-ghost">Add Bracket</button>
+        <button id="saveTaxBracketsBtn" class="btn btn-ghost">Save Brackets</button>
+        <button id="loadTaxBracketsBtn" class="btn btn-ghost">Load Brackets</button>
+      </div>
+      <div id="taxBracketsOut" class="table-wrap"></div>
+
+      <div class="form-grid" style="margin-bottom: 0.6rem;">
+        <input id="payrollPeriodLabel" placeholder="Period label (e.g. Oct 2025)" />
+        <input id="payrollPayDate" type="date" />
+        <select id="payrollExpenseAccountId">
+          <option value="">Payroll expense account</option>
+        </select>
+        <select id="payrollPayableAccountId">
+          <option value="">Payroll payable account</option>
+        </select>
+        <select id="payrollTaxLiabilityAccountId">
+          <option value="">Tax liability account (optional)</option>
+        </select>
+      </div>
+
+      <div class="form-grid" style="margin-bottom: 0.6rem;">
+        <input id="payrollPayeRate" type="number" step="0.01" min="0" max="100" placeholder="PAYE rate % (optional override)" />
+        <input id="payrollNssaRate" type="number" step="0.01" min="0" max="100" value="0" placeholder="NSSA rate %" />
+        <input id="payrollPensionRate" type="number" step="0.01" min="0" max="100" value="0" placeholder="Pension rate %" />
+        <input id="payrollSdlRate" type="number" step="0.01" min="0" max="100" value="0" placeholder="SDL rate %" />
+        <input id="payrollOtherDeduction" type="number" step="0.01" value="0" placeholder="Other deduction per employee" />
+        <select id="payrollBankAccountId">
+          <option value="">Payroll payment bank account</option>
+        </select>
+      </div>
+
+      <div class="actions">
+        <button id="createPayrollRunBtn" class="btn">Generate Payroll Run</button>
+        <button id="loadPayrollRunsBtn" class="btn btn-ghost">Load Payroll Runs</button>
+      </div>
+
+      <div id="payrollOut" class="table-wrap"></div>
+      <div id="payrollEmployeeDetailOut" class="table-wrap"></div>
+      <div id="payrollDocVaultOut" class="table-wrap"></div>
+    </section>
+
+    <section class="card card-wide" id="reportsCard">
+      <h2>Reports</h2>
+      <div class="form-grid" style="margin-bottom: 0.6rem;">
+        <input id="reportsFromDate" type="date" />
+        <input id="reportsToDate" type="date" />
+      </div>
+      <div class="form-grid" style="margin-bottom: 0.6rem;">
+        <input id="projectionMonths" type="number" min="1" max="60" value="12" placeholder="Projection months" />
+        <input id="projectionInflowGrowth" type="number" step="0.01" value="0" placeholder="Inflow growth % per month" />
+        <input id="projectionOutflowGrowth" type="number" step="0.01" value="0" placeholder="Outflow growth % per month" />
+        <input id="projectionOpeningOverride" type="number" step="0.01" placeholder="Opening cash override (optional)" />
+      </div>
+      <div class="tabs">
+        <button class="tab active" data-report="trial">Trial Balance</button>
+        <button class="tab" data-report="pnl">Profit &amp; Loss</button>
+        <button class="tab" data-report="bs">Balance Sheet</button>
+        <button class="tab" data-report="cf">Cash Flow</button>
+        <button class="tab" data-report="cfp">Cash Flow Projection</button>
+        <button class="tab" data-report="gl">General Ledger</button>
+      </div>
+      <button id="refreshReportsBtn" class="btn btn-primary">Refresh Report</button>
+      <div id="reportsOut" class="table-wrap"></div>
+    </section>
+
+    <section class="card card-wide" id="statementsHubCard">
+      <h2>Statements Hub</h2>
+      <p class="muted">View all statements after allocation/posting and download them.</p>
+      <div class="form-grid" style="margin-bottom: 0.6rem;">
+        <input id="companyName" placeholder="Company Name" />
+        <input id="companyAddress" placeholder="Company Address" />
+        <input id="companyEmail" placeholder="Company Email" />
+        <input id="companyPhone" placeholder="Company Phone" />
+        <input id="companyTaxNumber" placeholder="Tax Number" />
+        <input id="companyCurrency" placeholder="Currency (e.g. USD)" value="USD" />
+      </div>
+      <div class="actions" style="margin-bottom: 0.6rem;">
+        <button id="saveCompanyProfileBtn" class="btn">Save Company Profile</button>
+        <button id="loadCompanyProfileBtn" class="btn btn-ghost">Load Company Profile</button>
+      </div>
+      <div class="actions">
+        <button id="loadAllStatementsBtn" class="btn btn-primary">Load All Statements</button>
+        <select id="downloadReportName">
+          <option value="trial-balance">Trial Balance</option>
+          <option value="profit-loss">Profit &amp; Loss</option>
+          <option value="balance-sheet">Balance Sheet</option>
+          <option value="cash-flow">Cash Flow</option>
+          <option value="cash-flow-projection">Cash Flow Projection</option>
+          <option value="general-ledger">General Ledger</option>
+          <option value="bank-balance">Bank Balance Summary</option>
+          <option value="all">All Statements (JSON)</option>
+        </select>
+        <select id="downloadFormat">
+          <option value="csv">CSV</option>
+          <option value="json">JSON</option>
+          <option value="pdf">PDF</option>
+        </select>
+        <label style="display:flex;align-items:center;gap:0.35rem;">
+          <input id="downloadComparative" type="checkbox" checked />
+          Comparative PDF
+        </label>
+        <button id="downloadStatementBtn" class="btn btn-ghost">Download</button>
+      </div>
+      <pre id="statementsOut" class="output"></pre>
+    </section>
+  </main>
+
+  <div id="toast" class="toast"></div>
+
+  <script>
+    async function getCurrentUser() {
+      try {
+        const res = await fetch('/auth/me', { credentials: 'same-origin' });
+        if (!res.ok) {
+          return null;
+        }
+        return await res.json();
+      } catch (error) {
+        return null;
+      }
+    }
+
+    async function ensureAuthenticated() {
+      const user = await getCurrentUser();
+      if (!user) {
+        window.location.href = '/login';
+        return;
+      }
+      const info = document.getElementById('currentUserInfo');
+      if (info) {
+        info.textContent = `Logged in as ${user.full_name || user.email}`;
+      }
+      const logoutBtn = document.getElementById('logoutBtn');
+      if (logoutBtn) {
+        logoutBtn.addEventListener('click', async () => {
+          await fetch('/auth/logout', { method: 'POST', credentials: 'same-origin' });
+          window.location.href = '/login';
+        });
+      }
+    }
+
+    ensureAuthenticated();
+  </script>
+  <script src="/static/js/app.js?v=35"></script>
+</body>
+</html>
