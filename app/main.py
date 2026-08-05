@@ -285,6 +285,243 @@ def _safe_slug(value: str) -> str:
     return clean.strip("-") or "file"
 
 
+def _normalize_person_name(value: str) -> str:
+    text_value = re.sub(r"[^A-Za-z0-9 ]+", " ", str(value or "").upper())
+    return " ".join(text_value.split())
+
+
+def _parse_money(value: str | None) -> float:
+    raw = str(value or "").strip()
+    if not raw:
+        return 0.0
+    negative = raw.startswith("(") and raw.endswith(")")
+    cleaned = raw.replace("(", "").replace(")", "")
+    cleaned = cleaned.replace("R", "").replace(",", "").replace(" ", "")
+    cleaned = re.sub(r"[^0-9.\-]", "", cleaned)
+    if cleaned in {"", "-", ".", "-."}:
+        return 0.0
+    try:
+        amount = float(cleaned)
+    except ValueError:
+        return 0.0
+    return round(-amount if negative else amount, 2)
+
+
+def _find_import_employee_match(
+    employee_map: dict[str, list[models.PayrollEmployee]],
+    normalized_name: str,
+) -> models.PayrollEmployee | None:
+    options = employee_map.get(normalized_name) or []
+    return options[0] if options else None
+
+
+def _next_import_employee_code(db: Session, company_id: int) -> str:
+    prefix = "EMPIMP"
+    last = (
+        db.query(models.PayrollEmployee)
+        .filter(models.PayrollEmployee.company_id == company_id, models.PayrollEmployee.employee_code.like(f"{prefix}%"))
+        .order_by(models.PayrollEmployee.id.desc())
+        .first()
+    )
+    next_number = 1
+    if last and last.employee_code:
+        suffix = re.sub(r"[^0-9]", "", str(last.employee_code))
+        if suffix:
+            next_number = int(suffix) + 1
+    return f"{prefix}{next_number:04d}"
+
+
+def _parse_payroll_import_rows(raw_bytes: bytes) -> dict:
+    text_content = raw_bytes.decode("utf-8-sig", errors="ignore")
+    rows = list(csv.reader(io.StringIO(text_content)))
+    if not rows:
+        raise HTTPException(status_code=400, detail="Payroll CSV is empty")
+
+    title = ""
+    for row in rows:
+        first = (row[0] if row else "").strip()
+        if first:
+            title = first
+            break
+
+    header_index = None
+    for i, row in enumerate(rows):
+        upper = [str(x or "").strip().upper() for x in row]
+        if "NAME" in upper and "BASIC SALARY" in upper and "TOTAL DEDUCTIONS" in upper:
+            header_index = i
+            break
+    if header_index is None:
+        raise HTTPException(status_code=400, detail="Could not find payroll header row in CSV")
+
+    header = rows[header_index]
+
+    def cell(row: list[str], idx: int) -> str:
+        return row[idx] if idx < len(row) else ""
+
+    records = []
+    for row_idx in range(header_index + 1, len(rows)):
+        row = rows[row_idx]
+        if not row or not any(str(x or "").strip() for x in row):
+            continue
+        employee_name = cell(row, 0).strip()
+        if not employee_name or employee_name.upper().startswith("TOTAL"):
+            continue
+
+        basic_salary = _parse_money(cell(row, 1))
+        total_earnings = _parse_money(cell(row, 5))
+        total_deductions = _parse_money(cell(row, 22))
+        net_pay = _parse_money(cell(row, 24) or cell(row, 23))
+
+        if basic_salary == 0 and total_earnings == 0 and total_deductions == 0 and net_pay == 0:
+            continue
+
+        records.append(
+            {
+                "row_number": row_idx + 1,
+                "employee_name": employee_name,
+                "normalized_name": _normalize_person_name(employee_name),
+                "basic_salary": basic_salary,
+                "total_earnings": total_earnings,
+                "company_uif": _parse_money(cell(row, 7)),
+                "company_admin_levy": _parse_money(cell(row, 8)),
+                "company_medical_aid": _parse_money(cell(row, 9)),
+                "company_sick_pay": _parse_money(cell(row, 10)),
+                "company_provident_fund": _parse_money(cell(row, 11)),
+                "total_company_contributions": _parse_money(cell(row, 12)),
+                "total_cost_to_company": _parse_money(cell(row, 13)),
+                "tax_amount": _parse_money(cell(row, 15)),
+                "admin_levy": _parse_money(cell(row, 16)),
+                "uif_amount": _parse_money(cell(row, 17)),
+                "provident_fund": _parse_money(cell(row, 18)),
+                "medical_insurance": _parse_money(cell(row, 19)),
+                "sick_pay": _parse_money(cell(row, 20)),
+                "other_deduction": _parse_money(cell(row, 21)),
+                "total_deductions": total_deductions,
+                "net_pay": net_pay,
+            }
+        )
+
+    if not records:
+        raise HTTPException(status_code=400, detail="No payroll rows found in CSV")
+
+    return {"title": title, "header": header, "records": records}
+
+
+def _payroll_import_batch_payload(db: Session, batch: models.PayrollImportBatch, include_lines: bool = True) -> dict:
+    lines = (
+        db.query(models.PayrollImportLine)
+        .filter(models.PayrollImportLine.batch_id == batch.id)
+        .order_by(models.PayrollImportLine.row_number.asc(), models.PayrollImportLine.id.asc())
+        .all()
+    )
+
+    imported_name_set = {ln.normalized_name for ln in lines if ln.normalized_name}
+    all_employees = (
+        db.query(models.PayrollEmployee)
+        .filter(models.PayrollEmployee.company_id == batch.company_id, models.PayrollEmployee.active.is_(True))
+        .order_by(models.PayrollEmployee.full_name.asc())
+        .all()
+    )
+    extra_employees = [
+        _payroll_employee_payload(emp)
+        for emp in all_employees
+        if _normalize_person_name(emp.full_name) not in imported_name_set
+    ]
+
+    matched_lines = []
+    unmatched_lines = []
+    if include_lines:
+        for ln in lines:
+            row = {
+                "line_id": ln.id,
+                "row_number": ln.row_number,
+                "employee_name": ln.employee_name,
+                "matched_employee_id": ln.matched_employee_id,
+                "matched_employee_name": ln.matched_employee.full_name if ln.matched_employee else None,
+                "match_status": ln.match_status,
+                "total_earnings": float(ln.total_earnings or 0.0),
+                "tax_amount": float(ln.tax_amount or 0.0),
+                "total_deductions": float(ln.total_deductions or 0.0),
+                "net_pay": float(ln.net_pay or 0.0),
+            }
+            if ln.match_status == "matched":
+                matched_lines.append(row)
+            else:
+                unmatched_lines.append(row)
+
+    return {
+        "import_id": batch.id,
+        "title": batch.title,
+        "source_filename": batch.source_filename,
+        "period_label": batch.period_label,
+        "pay_date": batch.pay_date,
+        "financial_year_label": batch.financial_year_label,
+        "status": batch.status,
+        "row_count": batch.row_count,
+        "matched_count": batch.matched_count,
+        "unmatched_count": batch.unmatched_count,
+        "extra_employee_count": len(extra_employees),
+        "extra_employees": extra_employees,
+        "matched_lines": matched_lines,
+        "unmatched_lines": unmatched_lines,
+        "created_at": batch.created_at,
+    }
+
+
+def _apply_payroll_import_matching(db: Session, batch: models.PayrollImportBatch, auto_create_missing: bool = False):
+    employees = (
+        db.query(models.PayrollEmployee)
+        .filter(models.PayrollEmployee.company_id == batch.company_id)
+        .order_by(models.PayrollEmployee.id.asc())
+        .all()
+    )
+    employee_map: dict[str, list[models.PayrollEmployee]] = {}
+    for emp in employees:
+        employee_map.setdefault(_normalize_person_name(emp.full_name), []).append(emp)
+
+    lines = (
+        db.query(models.PayrollImportLine)
+        .filter(models.PayrollImportLine.batch_id == batch.id)
+        .order_by(models.PayrollImportLine.row_number.asc(), models.PayrollImportLine.id.asc())
+        .all()
+    )
+
+    for ln in lines:
+        if ln.matched_employee_id and ln.match_status == "matched":
+            continue
+
+        matched = _find_import_employee_match(employee_map, ln.normalized_name)
+
+        if not matched and auto_create_missing:
+            tokens = ln.employee_name.split()
+            surname = tokens[-1] if len(tokens) > 1 else ""
+            initials = "".join(part[:1].upper() for part in tokens[:-1][:3])
+            matched = models.PayrollEmployee(
+                company_id=batch.company_id,
+                employee_code=_next_import_employee_code(db, batch.company_id),
+                full_name=ln.employee_name,
+                initials=initials,
+                surname=surname,
+                default_gross_salary=float(ln.total_earnings or ln.basic_salary or 0.0),
+                tax_rate=0.0,
+                active=True,
+            )
+            db.add(matched)
+            db.flush()
+            employee_map.setdefault(ln.normalized_name, []).append(matched)
+
+        if matched:
+            ln.matched_employee_id = matched.id
+            ln.match_status = "matched"
+        else:
+            ln.matched_employee_id = None
+            ln.match_status = "unmatched"
+
+    batch.row_count = len(lines)
+    batch.matched_count = len([ln for ln in lines if ln.match_status == "matched"])
+    batch.unmatched_count = len([ln for ln in lines if ln.match_status == "unmatched"])
+
+
 def _payroll_employee_payload(emp: models.PayrollEmployee) -> dict:
     return {
         "id": emp.id,
@@ -2894,6 +3131,336 @@ def delete_payroll_employee_document(document_id: int, company_id: int = 1, db: 
     db.delete(doc)
     db.commit()
     return {"deleted": document_id}
+
+
+@app.post("/payroll/imports/preview")
+async def preview_payroll_import(
+    file: UploadFile = File(...),
+    period_label: str = Form(""),
+    pay_date: str | None = Form(None),
+    financial_year_label: str = Form(""),
+    auto_create_missing: bool = Form(False),
+    company_id: int = 1,
+    db: Session = Depends(get_db),
+):
+    _resolve_company(db, company_id)
+    if not str(file.filename or "").lower().endswith(".csv"):
+        raise HTTPException(status_code=400, detail="Payroll import supports CSV only")
+
+    raw = await file.read()
+    parsed = _parse_payroll_import_rows(raw)
+
+    parsed_pay_date = None
+    if pay_date:
+        try:
+            parsed_pay_date = date.fromisoformat(pay_date)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="pay_date must be in YYYY-MM-DD format") from exc
+
+    batch = models.PayrollImportBatch(
+        company_id=company_id,
+        source_filename=file.filename or "payroll.csv",
+        title=parsed.get("title") or "Payroll Import",
+        period_label=(period_label or "").strip() or (parsed.get("title") or "Payroll Import"),
+        pay_date=parsed_pay_date,
+        financial_year_label=(financial_year_label or "").strip(),
+        status="preview",
+        currency="ZAR",
+        raw_headers_json=json.dumps(parsed.get("header") or []),
+    )
+    db.add(batch)
+    db.flush()
+
+    for record in parsed.get("records") or []:
+        db.add(
+            models.PayrollImportLine(
+                batch_id=batch.id,
+                row_number=int(record.get("row_number") or 0),
+                employee_name=record.get("employee_name") or "",
+                normalized_name=record.get("normalized_name") or "",
+                match_status="unmatched",
+                basic_salary=float(record.get("basic_salary") or 0.0),
+                total_earnings=float(record.get("total_earnings") or 0.0),
+                total_company_contributions=float(record.get("total_company_contributions") or 0.0),
+                total_cost_to_company=float(record.get("total_cost_to_company") or 0.0),
+                company_uif=float(record.get("company_uif") or 0.0),
+                company_admin_levy=float(record.get("company_admin_levy") or 0.0),
+                company_medical_aid=float(record.get("company_medical_aid") or 0.0),
+                company_sick_pay=float(record.get("company_sick_pay") or 0.0),
+                company_provident_fund=float(record.get("company_provident_fund") or 0.0),
+                tax_amount=float(record.get("tax_amount") or 0.0),
+                admin_levy=float(record.get("admin_levy") or 0.0),
+                uif_amount=float(record.get("uif_amount") or 0.0),
+                provident_fund=float(record.get("provident_fund") or 0.0),
+                medical_insurance=float(record.get("medical_insurance") or 0.0),
+                sick_pay=float(record.get("sick_pay") or 0.0),
+                other_deduction=float(record.get("other_deduction") or 0.0),
+                total_deductions=float(record.get("total_deductions") or 0.0),
+                net_pay=float(record.get("net_pay") or 0.0),
+            )
+        )
+
+    db.flush()
+    _apply_payroll_import_matching(db, batch, auto_create_missing=bool(auto_create_missing))
+    db.commit()
+    db.refresh(batch)
+    return _payroll_import_batch_payload(db, batch, include_lines=True)
+
+
+@app.get("/payroll/imports/latest")
+def latest_payroll_import(company_id: int = 1, db: Session = Depends(get_db)):
+    _resolve_company(db, company_id)
+    batch = (
+        db.query(models.PayrollImportBatch)
+        .filter(models.PayrollImportBatch.company_id == company_id)
+        .order_by(models.PayrollImportBatch.created_at.desc(), models.PayrollImportBatch.id.desc())
+        .first()
+    )
+    if not batch:
+        raise HTTPException(status_code=404, detail="No payroll imports found")
+    return _payroll_import_batch_payload(db, batch, include_lines=True)
+
+
+@app.get("/payroll/imports/{import_id}")
+def payroll_import_detail(import_id: int, company_id: int = 1, db: Session = Depends(get_db)):
+    batch = (
+        db.query(models.PayrollImportBatch)
+        .filter(models.PayrollImportBatch.company_id == company_id, models.PayrollImportBatch.id == import_id)
+        .first()
+    )
+    if not batch:
+        raise HTTPException(status_code=404, detail="Payroll import not found")
+    return _payroll_import_batch_payload(db, batch, include_lines=True)
+
+
+@app.post("/payroll/imports/{import_id}/match")
+def payroll_import_match_line(
+    import_id: int,
+    payload: schemas.PayrollImportMatchRequest,
+    company_id: int = 1,
+    db: Session = Depends(get_db),
+):
+    batch = (
+        db.query(models.PayrollImportBatch)
+        .filter(models.PayrollImportBatch.company_id == company_id, models.PayrollImportBatch.id == import_id)
+        .first()
+    )
+    if not batch:
+        raise HTTPException(status_code=404, detail="Payroll import not found")
+
+    line = (
+        db.query(models.PayrollImportLine)
+        .filter(models.PayrollImportLine.batch_id == import_id, models.PayrollImportLine.id == payload.line_id)
+        .first()
+    )
+    if not line:
+        raise HTTPException(status_code=404, detail="Import line not found")
+
+    employee = (
+        db.query(models.PayrollEmployee)
+        .filter(models.PayrollEmployee.company_id == company_id, models.PayrollEmployee.id == payload.employee_id)
+        .first()
+    )
+    if not employee:
+        raise HTTPException(status_code=404, detail="Employee not found")
+
+    line.matched_employee_id = employee.id
+    line.match_status = "matched"
+    _apply_payroll_import_matching(db, batch, auto_create_missing=False)
+    db.commit()
+    db.refresh(batch)
+    return _payroll_import_batch_payload(db, batch, include_lines=True)
+
+
+@app.post("/payroll/imports/{import_id}/auto-create-unmatched")
+def auto_create_unmatched_payroll_employees(import_id: int, company_id: int = 1, db: Session = Depends(get_db)):
+    batch = (
+        db.query(models.PayrollImportBatch)
+        .filter(models.PayrollImportBatch.company_id == company_id, models.PayrollImportBatch.id == import_id)
+        .first()
+    )
+    if not batch:
+        raise HTTPException(status_code=404, detail="Payroll import not found")
+
+    _apply_payroll_import_matching(db, batch, auto_create_missing=True)
+    db.commit()
+    db.refresh(batch)
+    return _payroll_import_batch_payload(db, batch, include_lines=True)
+
+
+@app.post("/payroll/imports/{import_id}/create-run")
+def create_payroll_run_from_import(
+    import_id: int,
+    payload: schemas.PayrollImportCreateRunRequest,
+    company_id: int = 1,
+    db: Session = Depends(get_db),
+):
+    batch = (
+        db.query(models.PayrollImportBatch)
+        .filter(models.PayrollImportBatch.company_id == company_id, models.PayrollImportBatch.id == import_id)
+        .first()
+    )
+    if not batch:
+        raise HTTPException(status_code=404, detail="Payroll import not found")
+
+    lines = (
+        db.query(models.PayrollImportLine)
+        .filter(models.PayrollImportLine.batch_id == import_id)
+        .order_by(models.PayrollImportLine.row_number.asc(), models.PayrollImportLine.id.asc())
+        .all()
+    )
+    if not lines:
+        raise HTTPException(status_code=400, detail="Import has no payroll lines")
+
+    unmatched_count = len([ln for ln in lines if ln.match_status != "matched" or not ln.matched_employee_id])
+    if unmatched_count > 0:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot create run while {unmatched_count} employees are unmatched",
+        )
+
+    expense_account = (
+        db.query(models.Account)
+        .filter(models.Account.company_id == company_id, models.Account.id == payload.expense_account_id)
+        .first()
+    )
+    payable_account = (
+        db.query(models.Account)
+        .filter(models.Account.company_id == company_id, models.Account.id == payload.payable_account_id)
+        .first()
+    )
+    tax_account = None
+    if payload.tax_liability_account_id:
+        tax_account = (
+            db.query(models.Account)
+            .filter(models.Account.company_id == company_id, models.Account.id == payload.tax_liability_account_id)
+            .first()
+        )
+    if not expense_account or not payable_account:
+        raise HTTPException(status_code=404, detail="Expense or payable account not found")
+    if payload.tax_liability_account_id and not tax_account:
+        raise HTTPException(status_code=404, detail="Tax liability account not found")
+
+    effective_period = (payload.period_label or "").strip() or batch.period_label or batch.title or "Payroll Import"
+    fy_label = (payload.financial_year_label or "").strip() or batch.financial_year_label
+    if fy_label:
+        effective_period = f"{effective_period} | FY {fy_label}"
+
+    run = models.PayrollRun(
+        company_id=company_id,
+        period_label=effective_period,
+        pay_date=payload.pay_date or batch.pay_date or date.today(),
+        status="draft",
+        paye_rate=0.0,
+        nssa_rate=0.0,
+        pension_rate=0.0,
+        sdl_rate=0.0,
+        other_deduction_per_employee=0.0,
+        provident_mode="fixed_amount",
+        provident_value=0.0,
+        provident_scope="employee",
+        expense_account_id=payload.expense_account_id,
+        payable_account_id=payload.payable_account_id,
+        tax_liability_account_id=payload.tax_liability_account_id,
+    )
+    db.add(run)
+    db.flush()
+
+    totals = {
+        "gross": 0.0,
+        "tax": 0.0,
+        "nssa": 0.0,
+        "pension": 0.0,
+        "other": 0.0,
+        "sdl": 0.0,
+        "net": 0.0,
+    }
+
+    for ln in lines:
+        gross_pay = round(float(ln.total_earnings or ln.basic_salary or 0.0), 2)
+        tax_amount = round(float(ln.tax_amount or 0.0), 2)
+        pension_amount = round(float(ln.provident_fund or 0.0), 2)
+        other_deduction = round(
+            max(
+                float(ln.total_deductions or 0.0) - tax_amount - pension_amount,
+                float(ln.admin_levy or 0.0)
+                + float(ln.uif_amount or 0.0)
+                + float(ln.medical_insurance or 0.0)
+                + float(ln.sick_pay or 0.0)
+                + float(ln.other_deduction or 0.0),
+            ),
+            2,
+        )
+        total_deductions = round(float(ln.total_deductions or (tax_amount + pension_amount + other_deduction)), 2)
+        net_pay = round(float(ln.net_pay or max(gross_pay - total_deductions, 0.0)), 2)
+
+        components = [
+            {"name": "Tax", "scope": "employee", "calculation_type": "fixed_amount", "value": tax_amount, "amount": tax_amount},
+            {"name": "Admin Levy", "scope": "employee", "calculation_type": "fixed_amount", "value": float(ln.admin_levy or 0.0), "amount": float(ln.admin_levy or 0.0)},
+            {"name": "UIF", "scope": "employee", "calculation_type": "fixed_amount", "value": float(ln.uif_amount or 0.0), "amount": float(ln.uif_amount or 0.0)},
+            {"name": "Provident Fund", "scope": "employee", "calculation_type": "fixed_amount", "value": pension_amount, "amount": pension_amount},
+            {"name": "Medical Insurance", "scope": "employee", "calculation_type": "fixed_amount", "value": float(ln.medical_insurance or 0.0), "amount": float(ln.medical_insurance or 0.0)},
+            {"name": "Sick Pay", "scope": "employee", "calculation_type": "fixed_amount", "value": float(ln.sick_pay or 0.0), "amount": float(ln.sick_pay or 0.0)},
+            {"name": "Other", "scope": "employee", "calculation_type": "fixed_amount", "value": float(ln.other_deduction or 0.0), "amount": float(ln.other_deduction or 0.0)},
+            {"name": "Company UIF", "scope": "employer", "calculation_type": "fixed_amount", "value": float(ln.company_uif or 0.0), "amount": float(ln.company_uif or 0.0)},
+            {"name": "Company Admin Levy", "scope": "employer", "calculation_type": "fixed_amount", "value": float(ln.company_admin_levy or 0.0), "amount": float(ln.company_admin_levy or 0.0)},
+            {"name": "Company Medical Aid", "scope": "employer", "calculation_type": "fixed_amount", "value": float(ln.company_medical_aid or 0.0), "amount": float(ln.company_medical_aid or 0.0)},
+            {"name": "Company Sick Pay", "scope": "employer", "calculation_type": "fixed_amount", "value": float(ln.company_sick_pay or 0.0), "amount": float(ln.company_sick_pay or 0.0)},
+            {"name": "Company Provident Fund", "scope": "employer", "calculation_type": "fixed_amount", "value": float(ln.company_provident_fund or 0.0), "amount": float(ln.company_provident_fund or 0.0)},
+        ]
+
+        db.add(
+            models.PayrollRunLine(
+                payroll_run_id=run.id,
+                employee_id=ln.matched_employee_id,
+                gross_pay=gross_pay,
+                tax_amount=tax_amount,
+                nssa_amount=0.0,
+                pension_amount=pension_amount,
+                other_deduction=other_deduction,
+                sdl_amount=0.0,
+                total_deductions=total_deductions,
+                net_pay=net_pay,
+                employee_deductions_total=total_deductions,
+                employer_contributions_total=float(ln.total_company_contributions or 0.0),
+                deductions_json=json.dumps(components),
+            )
+        )
+
+        totals["gross"] += gross_pay
+        totals["tax"] += tax_amount
+        totals["pension"] += pension_amount
+        totals["other"] += other_deduction
+        totals["net"] += net_pay
+
+    run.total_gross = round(totals["gross"], 2)
+    run.total_tax = round(totals["tax"], 2)
+    run.total_nssa = round(totals["nssa"], 2)
+    run.total_pension = round(totals["pension"], 2)
+    run.total_other_deductions = round(totals["other"], 2)
+    run.total_sdl = round(totals["sdl"], 2)
+    run.total_net = round(totals["net"], 2)
+
+    batch.status = "processed"
+    db.commit()
+    db.refresh(run)
+    run_detail = _payroll_run_detail(run)
+    document_links = [
+        {
+            "employee_id": line.get("employee_id"),
+            "employee_code": line.get("employee_code"),
+            "employee_name": line.get("employee_name"),
+            "tax_certificate_url": f"/payroll/runs/{run.id}/tax-certificate/{line.get('employee_id')}?company_id={company_id}",
+            "payslip_url": f"/payroll/runs/{run.id}/payslip/{line.get('employee_id')}?company_id={company_id}",
+        }
+        for line in run_detail.get("lines", [])
+    ]
+    return {
+        "status": "created",
+        "import_id": batch.id,
+        "run": run_detail,
+        "document_links": document_links,
+    }
 
 
 @app.post("/payroll/employees/bulk")

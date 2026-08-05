@@ -336,6 +336,65 @@ class PayrollTaxBracket(Base):
     company = relationship("Company")
 
 
+class PayrollImportBatch(Base):
+    __tablename__ = "payroll_import_batches"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    company_id: Mapped[int] = mapped_column(ForeignKey("companies.id"), index=True, default=1)
+    source_filename: Mapped[str] = mapped_column(String(255), default="")
+    title: Mapped[str] = mapped_column(String(255), default="")
+    period_label: Mapped[str] = mapped_column(String(80), default="")
+    pay_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    financial_year_label: Mapped[str] = mapped_column(String(40), default="")
+    status: Mapped[str] = mapped_column(String(20), default="preview")
+    currency: Mapped[str] = mapped_column(String(10), default="ZAR")
+    row_count: Mapped[int] = mapped_column(Integer, default=0)
+    matched_count: Mapped[int] = mapped_column(Integer, default=0)
+    unmatched_count: Mapped[int] = mapped_column(Integer, default=0)
+    extra_employee_count: Mapped[int] = mapped_column(Integer, default=0)
+    raw_headers_json: Mapped[str] = mapped_column(String(4000), default="[]")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    company = relationship("Company")
+    lines = relationship("PayrollImportLine", back_populates="batch", cascade="all, delete-orphan")
+
+
+class PayrollImportLine(Base):
+    __tablename__ = "payroll_import_lines"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    batch_id: Mapped[int] = mapped_column(ForeignKey("payroll_import_batches.id"), index=True)
+    row_number: Mapped[int] = mapped_column(Integer, default=0)
+    employee_name: Mapped[str] = mapped_column(String(200), default="")
+    normalized_name: Mapped[str] = mapped_column(String(200), index=True, default="")
+    matched_employee_id: Mapped[int | None] = mapped_column(ForeignKey("payroll_employees.id"), nullable=True)
+    match_status: Mapped[str] = mapped_column(String(20), default="unmatched")
+
+    basic_salary: Mapped[float] = mapped_column(Float, default=0.0)
+    total_earnings: Mapped[float] = mapped_column(Float, default=0.0)
+    total_company_contributions: Mapped[float] = mapped_column(Float, default=0.0)
+    total_cost_to_company: Mapped[float] = mapped_column(Float, default=0.0)
+
+    company_uif: Mapped[float] = mapped_column(Float, default=0.0)
+    company_admin_levy: Mapped[float] = mapped_column(Float, default=0.0)
+    company_medical_aid: Mapped[float] = mapped_column(Float, default=0.0)
+    company_sick_pay: Mapped[float] = mapped_column(Float, default=0.0)
+    company_provident_fund: Mapped[float] = mapped_column(Float, default=0.0)
+
+    tax_amount: Mapped[float] = mapped_column(Float, default=0.0)
+    admin_levy: Mapped[float] = mapped_column(Float, default=0.0)
+    uif_amount: Mapped[float] = mapped_column(Float, default=0.0)
+    provident_fund: Mapped[float] = mapped_column(Float, default=0.0)
+    medical_insurance: Mapped[float] = mapped_column(Float, default=0.0)
+    sick_pay: Mapped[float] = mapped_column(Float, default=0.0)
+    other_deduction: Mapped[float] = mapped_column(Float, default=0.0)
+    total_deductions: Mapped[float] = mapped_column(Float, default=0.0)
+    net_pay: Mapped[float] = mapped_column(Float, default=0.0)
+
+    batch = relationship("PayrollImportBatch", back_populates="lines")
+    matched_employee = relationship("PayrollEmployee")
+
+
 class User(Base):
     __tablename__ = "users"
 

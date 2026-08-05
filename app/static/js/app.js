@@ -12,6 +12,8 @@ const out = {
   invoices: byId("invoicesOut"),
   invoiceDraft: byId("invoiceDraftLinesOut"),
   payroll: byId("payrollOut"),
+  payrollImport: byId("payrollImportOut"),
+  payrollImportRun: byId("payrollImportRunOut"),
   payrollEmployeeDetail: byId("payrollEmployeeDetailOut"),
   payrollDocVault: byId("payrollDocVaultOut"),
   taxBrackets: byId("taxBracketsOut"),
@@ -31,10 +33,13 @@ let payrollTaxBrackets = [];
 let draftInvoiceLines = [];
 let cachedCustomers = [];
 let cachedInventoryItems = [];
+let cachedPayrollEmployees = [];
 let activeCompanyId = Number(localStorage.getItem("activeCompanyId") || 1);
 let apiBase = localStorage.getItem("apiBase") || window.location.origin;
 let runningBalanceVisible = false;
 let activePayrollEmployeeId = null;
+let activePayrollImportId = null;
+let activeImportRunDocs = null;
 
 function buildApiUrl(path) {
   return new URL(path, apiBase);
@@ -535,6 +540,251 @@ function renderPayrollEmployeeDetail(detail) {
     <div class="statement-caption" style="margin-top:0.75rem;">Payroll History</div>
     ${historyTable}
   `;
+}
+
+function payrollImportEmployeeOptions(selectedEmployeeId = null) {
+  const options = ['<option value="">Select employee</option>'];
+  (cachedPayrollEmployees || []).forEach((emp) => {
+    const selected = Number(selectedEmployeeId || 0) === Number(emp.id || 0) ? "selected" : "";
+    options.push(`<option value="${emp.id}" ${selected}>${emp.employee_code} - ${emp.full_name}</option>`);
+  });
+  return options.join("");
+}
+
+function renderPayrollImportResult(payload) {
+  const container = out.payrollImport;
+  if (!container) {
+    return;
+  }
+  activePayrollImportId = Number(payload?.import_id || 0) || null;
+
+  const unmatchedRows = (payload?.unmatched_lines || [])
+    .map(
+      (ln) => `
+      <tr>
+        <td>${ln.row_number}</td>
+        <td>${ln.employee_name || ""}</td>
+        <td>${Number(ln.total_earnings || 0).toFixed(2)}</td>
+        <td>${Number(ln.total_deductions || 0).toFixed(2)}</td>
+        <td>${Number(ln.net_pay || 0).toFixed(2)}</td>
+        <td>
+          <div class="table-actions">
+            <select id="payrollImportMatchEmployee-${ln.line_id}" class="table-select">${payrollImportEmployeeOptions()}</select>
+            <button class="btn btn-small btn-ghost" onclick="matchPayrollImportLine(${ln.line_id})">Match</button>
+          </div>
+        </td>
+      </tr>
+    `
+    )
+    .join("");
+
+  const matchedRows = (payload?.matched_lines || [])
+    .map(
+      (ln) => `
+      <tr>
+        <td>${ln.row_number}</td>
+        <td>${ln.employee_name || ""}</td>
+        <td>${ln.matched_employee_name || ""}</td>
+        <td>${Number(ln.total_earnings || 0).toFixed(2)}</td>
+        <td>${Number(ln.total_deductions || 0).toFixed(2)}</td>
+        <td>${Number(ln.net_pay || 0).toFixed(2)}</td>
+      </tr>
+    `
+    )
+    .join("");
+
+  const extraRows = (payload?.extra_employees || [])
+    .map(
+      (emp) => `
+      <tr>
+        <td>${emp.id}</td>
+        <td>${emp.employee_code || ""}</td>
+        <td>${emp.full_name || ""}</td>
+        <td>${emp.active ? "Yes" : "No"}</td>
+      </tr>
+    `
+    )
+    .join("");
+
+  container.innerHTML = `
+    <div class="statement-caption">Payroll Import Preview</div>
+    <div class="report-period">
+      Import ID: ${payload.import_id || "-"} |
+      Title: ${payload.title || "-"} |
+      Period: ${payload.period_label || "-"} |
+      Pay Date: ${payload.pay_date || "-"} |
+      Financial Year: ${payload.financial_year_label || "-"} |
+      Rows: ${payload.row_count || 0} |
+      Matched: ${payload.matched_count || 0} |
+      Unmatched: ${payload.unmatched_count || 0} |
+      Extra In System: ${payload.extra_employee_count || 0}
+    </div>
+    <div class="statement-caption" style="margin-top:0.55rem;">Unmatched Employees In Import</div>
+    ${unmatchedRows ? `<table class="friendly-table"><thead><tr><th>Row</th><th>Imported Name</th><th>Total Earnings</th><th>Total Deductions</th><th>Net</th><th>Action</th></tr></thead><tbody>${unmatchedRows}</tbody></table>` : '<div class="empty-table">No unmatched imported employees.</div>'}
+    <div class="statement-caption" style="margin-top:0.55rem;">Matched Employees</div>
+    ${matchedRows ? `<table class="friendly-table"><thead><tr><th>Row</th><th>Imported Name</th><th>Matched Employee</th><th>Total Earnings</th><th>Total Deductions</th><th>Net</th></tr></thead><tbody>${matchedRows}</tbody></table>` : '<div class="empty-table">No matched employees yet.</div>'}
+    <div class="statement-caption" style="margin-top:0.55rem;">Employees In System But Not In This Payroll</div>
+    ${extraRows ? `<table class="friendly-table"><thead><tr><th>ID</th><th>Code</th><th>Name</th><th>Active</th></tr></thead><tbody>${extraRows}</tbody></table>` : '<div class="empty-table">No extra employees detected.</div>'}
+  `;
+}
+
+function renderPayrollImportRunResult(run, documentLinks = []) {
+  const container = out.payrollImportRun;
+  if (!container || !run) {
+    return;
+  }
+
+  const docRows = (documentLinks || [])
+    .map(
+      (doc) => `
+      <tr>
+        <td>${doc.employee_code || ""}</td>
+        <td>${doc.employee_name || ""}</td>
+        <td>
+          <div class="table-actions">
+            <button class="btn btn-small btn-ghost" onclick="downloadTaxCertificate(${run.id}, ${doc.employee_id})">IRP5 / Tax Cert</button>
+            <button class="btn btn-small btn-ghost" onclick="downloadPayslip(${run.id}, ${doc.employee_id})">Payslip</button>
+          </div>
+        </td>
+      </tr>
+    `
+    )
+    .join("");
+
+  container.innerHTML = `
+    <div class="statement-caption" style="margin-top:0.65rem;">Imported Payroll Run Created</div>
+    <div class="report-period">
+      Run ID: ${run.id} |
+      Period: ${run.period_label || "-"} |
+      Pay Date: ${run.pay_date || "-"} |
+      Employees: ${(run.lines || []).length} |
+      Gross: ${Number(run.total_gross || 0).toFixed(2)} |
+      Deductions: ${Number(run.total_other_deductions || 0).toFixed(2)} |
+      Net: ${Number(run.total_net || 0).toFixed(2)}
+    </div>
+    <div class="actions" style="margin:0.4rem 0;">
+      <button class="btn btn-ghost" onclick="openAllImportTaxCertificates()">Open All IRP5 / Tax Certificates</button>
+      <button class="btn btn-ghost" onclick="openAllImportPayslips()">Open All Payslips</button>
+    </div>
+    ${docRows ? `<table class="friendly-table"><thead><tr><th>Employee Code</th><th>Employee</th><th>Documents</th></tr></thead><tbody>${docRows}</tbody></table>` : '<div class="empty-table">No employee lines found in this run.</div>'}
+  `;
+}
+
+function openAllImportTaxCertificates() {
+  const docs = activeImportRunDocs?.documentLinks || [];
+  const runId = Number(activeImportRunDocs?.runId || 0);
+  if (!runId || !docs.length) {
+    showToast("No imported run documents to open");
+    return;
+  }
+  docs.forEach((doc) => {
+    if (doc?.employee_id) {
+      downloadTaxCertificate(runId, doc.employee_id);
+    }
+  });
+}
+
+function openAllImportPayslips() {
+  const docs = activeImportRunDocs?.documentLinks || [];
+  const runId = Number(activeImportRunDocs?.runId || 0);
+  if (!runId || !docs.length) {
+    showToast("No imported run documents to open");
+    return;
+  }
+  docs.forEach((doc) => {
+    if (doc?.employee_id) {
+      downloadPayslip(runId, doc.employee_id);
+    }
+  });
+}
+
+async function previewPayrollImport() {
+  const fileInput = byId("payrollImportFile");
+  const file = fileInput?.files?.[0];
+  if (!file) {
+    throw new Error("Choose a payroll CSV file first");
+  }
+
+  const form = new FormData();
+  form.append("file", file);
+  form.append("period_label", byId("payrollImportPeriodLabel")?.value?.trim() || "");
+  form.append("pay_date", byId("payrollImportPayDate")?.value || "");
+  form.append("financial_year_label", byId("payrollImportFinancialYear")?.value?.trim() || "");
+  form.append("auto_create_missing", "false");
+
+  const payload = await callApi("/payroll/imports/preview", { method: "POST", body: form, timeoutMs: 120000 });
+  renderPayrollImportResult(payload);
+  showToast("Payroll import preview loaded");
+}
+
+async function loadLatestPayrollImport() {
+  const payload = await callApi("/payroll/imports/latest");
+  renderPayrollImportResult(payload);
+}
+
+async function autoCreatePayrollImportUnmatched() {
+  if (!activePayrollImportId) {
+    throw new Error("Preview or load a payroll import first");
+  }
+  const payload = await callApi(`/payroll/imports/${activePayrollImportId}/auto-create-unmatched`, { method: "POST" });
+  renderPayrollImportResult(payload);
+  await loadPayrollEmployees(byId("payrollEmployeeSearch")?.value || "");
+  showToast("Unmatched employees auto-created and matched");
+}
+
+async function matchPayrollImportLineAction(lineId) {
+  if (!activePayrollImportId) {
+    throw new Error("Preview or load a payroll import first");
+  }
+  const employeeId = Number(byId(`payrollImportMatchEmployee-${lineId}`)?.value || 0);
+  if (!employeeId) {
+    throw new Error("Select an employee to match");
+  }
+  const payload = await callApi(`/payroll/imports/${activePayrollImportId}/match`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ line_id: Number(lineId), employee_id: employeeId }),
+  });
+  renderPayrollImportResult(payload);
+  showToast("Import line matched");
+}
+
+async function createPayrollRunFromImport() {
+  if (!activePayrollImportId) {
+    throw new Error("Preview or load a payroll import first");
+  }
+
+  const expense_account_id = Number(byId("payrollExpenseAccountId")?.value || 0);
+  const payable_account_id = Number(byId("payrollPayableAccountId")?.value || 0);
+  const rawTaxId = Number(byId("payrollTaxLiabilityAccountId")?.value || 0);
+  const tax_liability_account_id = rawTaxId > 0 ? rawTaxId : null;
+  if (!expense_account_id || !payable_account_id) {
+    throw new Error("Select payroll expense and payable accounts first");
+  }
+
+  const payload = await callApi(`/payroll/imports/${activePayrollImportId}/create-run`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      expense_account_id,
+      payable_account_id,
+      tax_liability_account_id,
+      period_label: byId("payrollImportPeriodLabel")?.value?.trim() || null,
+      pay_date: byId("payrollImportPayDate")?.value || null,
+      financial_year_label: byId("payrollImportFinancialYear")?.value?.trim() || null,
+    }),
+  });
+
+  showToast("Payroll run created from import");
+  activeImportRunDocs = {
+    runId: payload?.run?.id,
+    documentLinks: Array.isArray(payload?.document_links) ? payload.document_links : [],
+  };
+  renderPayrollImportRunResult(payload?.run, payload?.document_links || []);
+  await loadPayrollRuns();
+  if (payload?.run?.id) {
+    await viewPayrollRunDetails(payload.run.id);
+  }
 }
 
 function renderPayrollDocumentVault(rows) {
@@ -2350,6 +2600,7 @@ async function saveTaxBrackets() {
 async function loadPayrollEmployees(searchText = "") {
   const query = searchText && searchText.trim() ? `?q=${encodeURIComponent(searchText.trim())}` : "";
   const payload = await callApi(`/payroll/employees${query}`);
+  cachedPayrollEmployees = Array.isArray(payload) ? payload : [];
   renderPayrollEmployeesTable(payload);
 }
 
@@ -2934,6 +3185,10 @@ bind("loadLoanScheduleBtn", loadLoanSchedule, out.loans);
 bind("addPayrollEmployeeBtn", addPayrollEmployee, out.payroll);
 bind("loadPayrollEmployeesBtn", loadPayrollEmployees, out.payroll);
 bind("searchPayrollEmployeeBtn", searchPayrollEmployees, out.payroll);
+bind("previewPayrollImportBtn", previewPayrollImport, out.payrollImport);
+bind("autoCreatePayrollImportBtn", autoCreatePayrollImportUnmatched, out.payrollImport);
+bind("createPayrollRunFromImportBtn", createPayrollRunFromImport, out.payrollImport);
+bind("loadLastPayrollImportBtn", loadLatestPayrollImport, out.payrollImport);
 bind("uploadPayrollDocBtn", uploadPayrollEmployeeDocument, out.payrollDocVault);
 bind("loadPayrollDocVaultBtn", loadPayrollDocVault, out.payrollDocVault);
 bind("createPayrollRunBtn", createPayrollRun, out.payroll);
@@ -3089,4 +3344,16 @@ window.viewPayrollEmployee = (...args) => {
     writeOut(out.payrollEmployeeDetail, `Error: ${err.message || err}`);
     showToast(err.message || "Employee profile lookup failed");
   });
+};
+window.matchPayrollImportLine = (...args) => {
+  matchPayrollImportLineAction(...args).catch((err) => {
+    writeOut(out.payrollImport, `Error: ${err.message || err}`);
+    showToast(err.message || "Payroll import match failed");
+  });
+};
+window.openAllImportTaxCertificates = (...args) => {
+  openAllImportTaxCertificates(...args);
+};
+window.openAllImportPayslips = (...args) => {
+  openAllImportPayslips(...args);
 };

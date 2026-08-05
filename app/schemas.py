@@ -379,6 +379,20 @@ class PayrollEmployeesBulkCreate(BaseModel):
     employees: list[PayrollEmployeeCreate]
 
 
+class PayrollImportMatchRequest(BaseModel):
+    line_id: int
+    employee_id: int
+
+
+class PayrollImportCreateRunRequest(BaseModel):
+    expense_account_id: int
+    payable_account_id: int
+    tax_liability_account_id: int | None = None
+    period_label: str | None = None
+    pay_date: date | None = None
+    financial_year_label: str | None = None
+
+
 class InvoiceLineCreate(BaseModel):
     description: str
     quantity: float = 1.0

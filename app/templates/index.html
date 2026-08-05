@@ -336,6 +336,22 @@
         <button id="searchPayrollEmployeeBtn" class="btn btn-ghost">Search Employee</button>
       </div>
 
+      <div class="statement-caption" style="margin-top:0.3rem;">Payroll CSV Import</div>
+      <div class="form-grid" style="margin-bottom: 0.6rem;">
+        <input id="payrollImportPeriodLabel" placeholder="Payroll period label (e.g. Jul 2025)" />
+        <input id="payrollImportPayDate" type="date" />
+        <input id="payrollImportFinancialYear" placeholder="Financial year (e.g. 2025/2026)" />
+        <input id="payrollImportFile" type="file" accept=".csv" />
+      </div>
+      <div class="actions" style="margin-bottom: 0.45rem;">
+        <button id="previewPayrollImportBtn" class="btn btn-ghost">Preview Payroll Import</button>
+        <button id="autoCreatePayrollImportBtn" class="btn btn-ghost">Auto Create Unmatched Employees</button>
+        <button id="createPayrollRunFromImportBtn" class="btn btn-ghost">Create Payroll Run From Import</button>
+        <button id="loadLastPayrollImportBtn" class="btn btn-ghost">Load Last Import</button>
+      </div>
+      <div id="payrollImportOut" class="table-wrap"></div>
+      <div id="payrollImportRunOut" class="table-wrap"></div>
+
       <div class="form-grid" style="margin-bottom: 0.6rem;">
         <input id="payrollDocEmployeeId" type="number" placeholder="Employee ID for docs" />
         <select id="payrollDocType">
