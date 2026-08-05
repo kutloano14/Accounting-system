@@ -34,6 +34,7 @@ let cachedInventoryItems = [];
 let activeCompanyId = Number(localStorage.getItem("activeCompanyId") || 1);
 let apiBase = localStorage.getItem("apiBase") || window.location.origin;
 let runningBalanceVisible = false;
+let activePayrollEmployeeId = null;
 
 function buildApiUrl(path) {
   return new URL(path, apiBase);
@@ -407,6 +408,7 @@ function renderPayrollEmployeeDetail(detail) {
   }
 
   const emp = detail?.employee || {};
+  activePayrollEmployeeId = Number(emp.id || 0) || null;
   const photo = String(emp.photo_url || "").trim();
   const avatar = photo
     ? `<img src="${photo}" alt="${emp.full_name || "Employee"}" style="width:96px;height:96px;border-radius:50%;object-fit:cover;border:2px solid #d8e6ff;" />`
@@ -444,7 +446,12 @@ function renderPayrollEmployeeDetail(detail) {
         <td>${d.original_filename || ""}</td>
         <td>${formatBytes(d.file_size)}</td>
         <td>${d.uploaded_at ? String(d.uploaded_at).slice(0, 10) : ""}</td>
-        <td><button class="btn btn-small btn-ghost" onclick="downloadPayrollDocument(${d.id})">Download</button></td>
+        <td>
+          <div class="table-actions">
+            <button class="btn btn-small btn-ghost" onclick="downloadPayrollDocument(${d.id})">Download</button>
+            <button class="btn btn-small btn-ghost" onclick="deletePayrollDocumentById(${d.id})">Delete</button>
+          </div>
+        </td>
       </tr>
     `)
     .join("");
@@ -463,6 +470,51 @@ function renderPayrollEmployeeDetail(detail) {
         <div>Gross: ${Number(emp.default_gross_salary || 0).toFixed(2)} | Tax: ${Number(emp.tax_rate || 0).toFixed(2)}% | Active: ${emp.active ? "Yes" : "No"}</div>
       </div>
     </div>
+
+    <div class="statement-caption" style="margin-top:0.75rem;">Edit Employee Profile</div>
+    <div class="form-grid">
+      <input id="profileEmployeeCode" value="${emp.employee_code || ""}" placeholder="Employee code" />
+      <input id="profileFullName" value="${emp.full_name || ""}" placeholder="Full name" />
+      <input id="profileInitials" value="${emp.initials || ""}" placeholder="Initials" />
+      <input id="profileSurname" value="${emp.surname || ""}" placeholder="Surname" />
+      <input id="profileNationality" value="${emp.nationality || ""}" placeholder="Nationality" />
+      <input id="profileAddress" value="${emp.address || ""}" placeholder="Address" />
+      <input id="profilePhotoUrl" value="${emp.photo_url || ""}" placeholder="Photo URL" />
+      <input id="profilePosition" value="${emp.position || ""}" placeholder="Position" />
+      <input id="profileEmail" value="${emp.email || ""}" placeholder="Email" />
+      <input id="profilePhone" value="${emp.phone || ""}" placeholder="Phone" />
+      <input id="profileHireDate" type="date" value="${emp.hire_date || ""}" />
+      <input id="profileIdNumber" value="${emp.id_number || ""}" placeholder="ID Number" />
+      <input id="profileTaxNumber" value="${emp.tax_number || ""}" placeholder="Tax Number" />
+      <input id="profileGrossSalary" type="number" step="0.01" value="${Number(emp.default_gross_salary || 0)}" placeholder="Gross salary" />
+      <input id="profileTaxRate" type="number" step="0.01" min="0" max="100" value="${Number(emp.tax_rate || 0)}" placeholder="Tax rate %" />
+      <select id="profileActive">
+        <option value="true" ${emp.active ? "selected" : ""}>Active</option>
+        <option value="false" ${!emp.active ? "selected" : ""}>Inactive</option>
+      </select>
+      <input id="profileBankAccount" value="${emp.bank_account || ""}" placeholder="Bank account" />
+      <input id="profileBankName" value="${emp.bank_name || ""}" placeholder="Bank name" />
+      <input id="profileBankBranch" value="${emp.bank_branch || ""}" placeholder="Bank branch" />
+      <input id="profileBankAccountType" value="${emp.bank_account_type || ""}" placeholder="Bank account type" />
+      <input id="profileNssaNumber" value="${emp.nssa_number || ""}" placeholder="NSSA number" />
+      <input id="profilePensionNumber" value="${emp.pension_number || ""}" placeholder="Pension number" />
+      <input id="profileMedicalAidNumber" value="${emp.medical_aid_number || ""}" placeholder="Medical aid number" />
+      <input id="profileSickFundNumber" value="${emp.sick_fund_number || ""}" placeholder="Sick fund number" />
+      <input id="profileProvidentFundNumber" value="${emp.provident_fund_number || ""}" placeholder="Provident fund number" />
+      <input id="profileMedicalAidEmployeeAmount" type="number" step="0.01" min="0" value="${Number(emp.medical_aid_employee_amount || 0)}" placeholder="Medical aid employee deduction" />
+      <input id="profileMedicalAidEmployerAmount" type="number" step="0.01" min="0" value="${Number(emp.medical_aid_employer_amount || 0)}" placeholder="Medical aid employer contribution" />
+      <input id="profileSickFundAmount" type="number" step="0.01" min="0" value="${Number(emp.sick_fund_amount || 0)}" placeholder="Sick fund deduction" />
+      <input id="profileProvidentFundEmployeeRate" type="number" step="0.01" min="0" max="100" value="${Number(emp.provident_fund_employee_rate || 0)}" placeholder="Provident employee %" />
+      <input id="profileProvidentFundEmployerRate" type="number" step="0.01" min="0" max="100" value="${Number(emp.provident_fund_employer_rate || 0)}" placeholder="Provident employer %" />
+      <input id="profileOtherDeductionName" value="${emp.other_deduction_name || ""}" placeholder="Other deduction name" />
+      <input id="profileOtherDeductionAmount" type="number" step="0.01" min="0" value="${Number(emp.other_deduction_amount || 0)}" placeholder="Other deduction amount" />
+    </div>
+    <div class="actions" style="margin-top:0.55rem;">
+      <button class="btn" onclick="savePayrollEmployeeProfile()">Save Employee</button>
+      <button class="btn btn-ghost" onclick="resetPayrollEmployeeDeductions()">Reset Deductions</button>
+      <button class="btn btn-ghost" onclick="deletePayrollEmployeeProfile()">Delete Employee</button>
+    </div>
+
     <div class="profile-grid">
       <div><b>Position:</b> ${emp.position || "-"}</div>
       <div><b>Hire Date:</b> ${emp.hire_date || "-"}</div>
@@ -473,6 +525,10 @@ function renderPayrollEmployeeDetail(detail) {
       <div><b>Bank Account:</b> ${emp.bank_account || "-"}</div>
       <div><b>NSSA:</b> ${emp.nssa_number || "-"}</div>
       <div><b>Pension:</b> ${emp.pension_number || "-"}</div>
+      <div><b>Medical Aid (Emp):</b> ${Number(emp.medical_aid_employee_amount || 0).toFixed(2)}</div>
+      <div><b>Sick Fund:</b> ${Number(emp.sick_fund_amount || 0).toFixed(2)}</div>
+      <div><b>Provident (Emp %):</b> ${Number(emp.provident_fund_employee_rate || 0).toFixed(2)}%</div>
+      <div><b>Provident (Employer %):</b> ${Number(emp.provident_fund_employer_rate || 0).toFixed(2)}%</div>
     </div>
     <div class="statement-caption" style="margin-top:0.75rem;">Employee Documents</div>
     ${docsTable}
@@ -501,7 +557,12 @@ function renderPayrollDocumentVault(rows) {
         <td>${d.original_filename || ""}</td>
         <td>${formatBytes(d.file_size)}</td>
         <td>${d.uploaded_at ? String(d.uploaded_at).slice(0, 10) : ""}</td>
-        <td><button class="btn btn-small btn-ghost" onclick="downloadPayrollDocument(${d.id})">Download</button></td>
+        <td>
+          <div class="table-actions">
+            <button class="btn btn-small btn-ghost" onclick="downloadPayrollDocument(${d.id})">Download</button>
+            <button class="btn btn-small btn-ghost" onclick="deletePayrollDocumentById(${d.id})">Delete</button>
+          </div>
+        </td>
       </tr>
     `
     )
@@ -1364,7 +1425,6 @@ async function loadAccounts() {
   const select = byId("ruleAccountId");
   const manageSelect = byId("accountManageSelect");
   const txnAccountSelect = byId("txnAccountId");
-  const txnAccountFilterSelect = byId("transactionAccountFilter");
   const assetAccountSelect = byId("assetAccountId");
   const assetDepSelect = byId("assetDepExpenseAccountId");
   const loanLiabilitySelect = byId("loanLiabilityAccountId");
@@ -1377,13 +1437,11 @@ async function loadAccounts() {
   const selected = select.value;
   const manageSelected = manageSelect.value;
   const txnAccountSelected = txnAccountSelect?.value || "";
-  const txnAccountFilterSelected = txnAccountFilterSelect?.value || "";
   const invoiceIncomeSelected = invoiceIncomeSelect?.value || "";
 
   select.innerHTML = '<option value="">Select account</option>';
   manageSelect.innerHTML = '<option value="">Select account to delete</option>';
   if (txnAccountSelect) txnAccountSelect.innerHTML = '<option value="">Assigned account (optional)</option>';
-  if (txnAccountFilterSelect) txnAccountFilterSelect.innerHTML = '<option value="">All accounts</option>';
   assetAccountSelect.innerHTML = '<option value="">Asset account</option>';
   assetDepSelect.innerHTML = '<option value="">Depreciation expense account</option>';
   loanLiabilitySelect.innerHTML = '<option value="">Loan liability account</option>';
@@ -1413,13 +1471,6 @@ async function loadAccounts() {
       txnOpt.value = String(account.id);
       txnOpt.textContent = label;
       txnAccountSelect.appendChild(txnOpt);
-    }
-
-    if (txnAccountFilterSelect) {
-      const txnFilterOpt = document.createElement("option");
-      txnFilterOpt.value = String(account.id);
-      txnFilterOpt.textContent = label;
-      txnAccountFilterSelect.appendChild(txnFilterOpt);
     }
 
     const cat = normalizedCategory(account.category);
@@ -1494,9 +1545,6 @@ async function loadAccounts() {
   }
   if (txnAccountSelected && txnAccountSelect) {
     txnAccountSelect.value = txnAccountSelected;
-  }
-  if (txnAccountFilterSelected && txnAccountFilterSelect) {
-    txnAccountFilterSelect.value = txnAccountFilterSelected;
   }
   if (invoiceIncomeSelected && invoiceIncomeSelect) {
     invoiceIncomeSelect.value = invoiceIncomeSelected;
@@ -1729,15 +1777,11 @@ async function deleteAccount() {
 function buildTransactionFilterQuery() {
   const params = new URLSearchParams();
   const q = byId("transactionSearch")?.value?.trim() || "";
-  const accountId = Number(byId("transactionAccountFilter")?.value || 0);
   const fromDate = byId("transactionFromDate")?.value || "";
   const toDate = byId("transactionToDate")?.value || "";
 
   if (q) {
     params.set("q", q);
-  }
-  if (accountId > 0) {
-    params.set("account_id", String(accountId));
   }
   if (fromDate) {
     params.set("from_date", fromDate);
@@ -1755,40 +1799,16 @@ async function loadTransactions() {
   const path = query ? `/bank/transactions?${query}` : "/bank/transactions";
   const payload = await callApi(path, { timeoutMs: 90000 });
   renderTransactionsTable(payload);
-  const total = (payload || []).reduce((sum, row) => sum + Number(row.amount || 0), 0);
-  const totalEl = byId("transactionsTotal");
-  if (totalEl) {
-    totalEl.textContent = `Total: ${total.toFixed(2)}`;
-  }
-  const accountSelect = byId("transactionAccountFilter");
-  const summaryEl = byId("transactionsSearchSummary");
-  if (summaryEl) {
-    const accountLabel = accountSelect?.selectedOptions?.[0]?.textContent || "All accounts";
-    summaryEl.textContent = `Showing ${payload.length || 0} transactions for ${accountLabel}`;
-  }
   showToast(`Loaded ${payload.length || 0} transactions`);
 }
 
 function clearTransactionFilters() {
   if (byId("transactionSearch")) byId("transactionSearch").value = "";
   if (byId("transactionFromDate")) byId("transactionFromDate").value = "";
-  if (byId("transactionAccountFilter")) byId("transactionAccountFilter").value = "";
   if (byId("transactionToDate")) byId("transactionToDate").value = "";
-  const totalEl = byId("transactionsTotal");
-  if (totalEl) {
-    totalEl.textContent = "Total: 0.00";
-  }
-  const summaryEl = byId("transactionsSearchSummary");
-  if (summaryEl) {
-    summaryEl.textContent = "";
-  }
 }
 
 async function applyTransactionFilters() {
-  const accountId = Number(byId("transactionAccountFilter")?.value || 0);
-  if (!accountId) {
-    throw new Error("Choose an account first");
-  }
   await loadTransactions();
 }
 
@@ -2340,9 +2360,116 @@ async function searchPayrollEmployees() {
 
 async function viewPayrollEmployeeDetails(employeeId) {
   const payload = await callApi(`/payroll/employees/${employeeId}`);
+  activePayrollEmployeeId = Number(employeeId || 0) || null;
   byId("payrollDocEmployeeId").value = String(employeeId);
   renderPayrollEmployeeDetail(payload);
   renderPayrollDocumentVault(payload.documents || []);
+}
+
+function profileNumericValue(id) {
+  const value = Number(byId(id)?.value ?? 0);
+  return Number.isNaN(value) ? 0 : value;
+}
+
+function profileTextValue(id) {
+  return byId(id)?.value?.trim() || "";
+}
+
+async function savePayrollEmployeeProfile() {
+  const employeeId = Number(activePayrollEmployeeId || byId("payrollDocEmployeeId")?.value || 0);
+  if (!employeeId) {
+    throw new Error("Load an employee profile first");
+  }
+
+  const payload = {
+    employee_code: profileTextValue("profileEmployeeCode"),
+    full_name: profileTextValue("profileFullName"),
+    initials: profileTextValue("profileInitials"),
+    surname: profileTextValue("profileSurname"),
+    address: profileTextValue("profileAddress"),
+    nationality: profileTextValue("profileNationality"),
+    photo_url: profileTextValue("profilePhotoUrl"),
+    id_number: profileTextValue("profileIdNumber"),
+    tax_number: profileTextValue("profileTaxNumber"),
+    email: profileTextValue("profileEmail"),
+    phone: profileTextValue("profilePhone"),
+    position: profileTextValue("profilePosition"),
+    hire_date: byId("profileHireDate")?.value || null,
+    bank_account: profileTextValue("profileBankAccount"),
+    bank_name: profileTextValue("profileBankName"),
+    bank_branch: profileTextValue("profileBankBranch"),
+    bank_account_type: profileTextValue("profileBankAccountType"),
+    nssa_number: profileTextValue("profileNssaNumber"),
+    pension_number: profileTextValue("profilePensionNumber"),
+    medical_aid_number: profileTextValue("profileMedicalAidNumber"),
+    medical_aid_employee_amount: profileNumericValue("profileMedicalAidEmployeeAmount"),
+    medical_aid_employer_amount: profileNumericValue("profileMedicalAidEmployerAmount"),
+    sick_fund_number: profileTextValue("profileSickFundNumber"),
+    sick_fund_amount: profileNumericValue("profileSickFundAmount"),
+    provident_fund_number: profileTextValue("profileProvidentFundNumber"),
+    provident_fund_employee_rate: profileNumericValue("profileProvidentFundEmployeeRate"),
+    provident_fund_employer_rate: profileNumericValue("profileProvidentFundEmployerRate"),
+    other_deduction_name: profileTextValue("profileOtherDeductionName"),
+    other_deduction_amount: profileNumericValue("profileOtherDeductionAmount"),
+    default_gross_salary: profileNumericValue("profileGrossSalary"),
+    tax_rate: profileNumericValue("profileTaxRate"),
+    active: (byId("profileActive")?.value || "true") === "true",
+  };
+
+  await callApi(`/payroll/employees/${employeeId}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  showToast("Employee profile updated");
+  await loadPayrollEmployees(byId("payrollEmployeeSearch")?.value || "");
+  await viewPayrollEmployeeDetails(employeeId);
+}
+
+async function resetPayrollEmployeeDeductions() {
+  byId("profileMedicalAidEmployeeAmount").value = "0";
+  byId("profileMedicalAidEmployerAmount").value = "0";
+  byId("profileSickFundAmount").value = "0";
+  byId("profileProvidentFundEmployeeRate").value = "0";
+  byId("profileProvidentFundEmployerRate").value = "0";
+  byId("profileOtherDeductionAmount").value = "0";
+  byId("profileOtherDeductionName").value = "";
+  await savePayrollEmployeeProfile();
+}
+
+async function deletePayrollEmployeeProfile() {
+  const employeeId = Number(activePayrollEmployeeId || byId("payrollDocEmployeeId")?.value || 0);
+  if (!employeeId) {
+    throw new Error("Load an employee profile first");
+  }
+  const ok = window.confirm("Delete this employee? This cannot be undone.");
+  if (!ok) {
+    return;
+  }
+
+  await callApi(`/payroll/employees/${employeeId}`, { method: "DELETE" });
+  showToast("Employee deleted");
+  activePayrollEmployeeId = null;
+  byId("payrollDocEmployeeId").value = "";
+  if (out.payrollEmployeeDetail) {
+    out.payrollEmployeeDetail.innerHTML = '<div class="empty-table">Employee profile removed.</div>';
+  }
+  if (out.payrollDocVault) {
+    out.payrollDocVault.innerHTML = '<div class="empty-table">No documents found for this employee.</div>';
+  }
+  await loadPayrollEmployees(byId("payrollEmployeeSearch")?.value || "");
+}
+
+async function deletePayrollDocumentById(docId) {
+  const ok = window.confirm("Delete this document?");
+  if (!ok) {
+    return;
+  }
+  await callApi(`/payroll/documents/${docId}`, { method: "DELETE" });
+  showToast("Document deleted");
+  if (activePayrollEmployeeId) {
+    await viewPayrollEmployeeDetails(activePayrollEmployeeId);
+  }
 }
 
 async function uploadPayrollEmployeeDocument() {
@@ -2432,6 +2559,9 @@ async function createPayrollRun() {
   const paye_rate = paye_rate_raw === "" || paye_rate_raw == null ? null : Number(paye_rate_raw);
   const nssa_rate = Number(byId("payrollNssaRate")?.value || 0);
   const pension_rate = Number(byId("payrollPensionRate")?.value || 0);
+  const provident_mode = byId("payrollProvidentMode")?.value || "fixed_amount";
+  const provident_value = Number(byId("payrollProvidentValue")?.value || 0);
+  const provident_scope = byId("payrollProvidentScope")?.value || "employee";
   const sdl_rate = Number(byId("payrollSdlRate")?.value || 0);
   const other_deduction_per_employee = Number(byId("payrollOtherDeduction")?.value || 0);
 
@@ -2451,6 +2581,9 @@ async function createPayrollRun() {
       paye_rate,
       nssa_rate,
       pension_rate,
+      provident_mode,
+      provident_value,
+      provident_scope,
       sdl_rate,
       other_deduction_per_employee,
     }),
@@ -2500,6 +2633,7 @@ async function viewPayrollRunDetails(runId) {
       PAYE: ${Number(payload.total_tax || 0).toFixed(2)} |
       NSSA: ${Number(payload.total_nssa || 0).toFixed(2)} |
       Pension: ${Number(payload.total_pension || 0).toFixed(2)} |
+      Provident: ${payload.provident_mode === "percentage_of_gross" ? `${Number(payload.provident_value || 0).toFixed(2)}%` : Number(payload.provident_value || 0).toFixed(2)} (${payload.provident_scope || "employee"}) |
       SDL: ${Number(payload.total_sdl || 0).toFixed(2)} |
       Net: ${Number(payload.total_net || 0).toFixed(2)}
     </div>
@@ -2709,19 +2843,6 @@ function downloadStatement() {
   window.open(url, "_blank");
 }
 
-function downloadFilteredTransactions() {
-  const accountId = Number(byId("transactionAccountFilter")?.value || 0);
-  if (!accountId) {
-    throw new Error("Choose an account first");
-  }
-  const query = buildTransactionFilterQuery();
-  const path = query ? `/bank/transactions/download?${query}` : "/bank/transactions/download";
-  const url = buildApiUrl(path);
-  url.searchParams.set("company_id", String(activeCompanyId || 1));
-  url.searchParams.set("format", "csv");
-  window.open(url.toString(), "_blank");
-}
-
 function wireTabs() {
   document.querySelectorAll(".tab").forEach((btn) => {
     btn.addEventListener("click", () => {
@@ -2785,7 +2906,6 @@ bind("clearTransactionFiltersBtn", async () => {
   clearTransactionFilters();
   await loadTransactions();
 }, out.transactions);
-bind("downloadFilteredTransactionsBtn", downloadFilteredTransactions, out.transactions);
 bind("addTransactionBtn", addManualTransaction, out.transactions);
 bind("updateTransactionBtn", updateManualTransaction, out.transactions);
 bind("clearTransactionFormBtn", clearTransactionForm, out.transactions);
@@ -2912,6 +3032,30 @@ window.downloadEmploymentCertificate = (...args) => {
 };
 window.downloadPayrollDocument = (...args) => {
   downloadPayrollDocument(...args);
+};
+window.savePayrollEmployeeProfile = (...args) => {
+  savePayrollEmployeeProfile(...args).catch((err) => {
+    writeOut(out.payrollEmployeeDetail, `Error: ${err.message || err}`);
+    showToast(err.message || "Employee update failed");
+  });
+};
+window.resetPayrollEmployeeDeductions = (...args) => {
+  resetPayrollEmployeeDeductions(...args).catch((err) => {
+    writeOut(out.payrollEmployeeDetail, `Error: ${err.message || err}`);
+    showToast(err.message || "Reset deductions failed");
+  });
+};
+window.deletePayrollEmployeeProfile = (...args) => {
+  deletePayrollEmployeeProfile(...args).catch((err) => {
+    writeOut(out.payrollEmployeeDetail, `Error: ${err.message || err}`);
+    showToast(err.message || "Employee delete failed");
+  });
+};
+window.deletePayrollDocumentById = (...args) => {
+  deletePayrollDocumentById(...args).catch((err) => {
+    writeOut(out.payrollDocVault, `Error: ${err.message || err}`);
+    showToast(err.message || "Document delete failed");
+  });
 };
 window.viewInvoice = (...args) => {
   viewInvoiceDetails(...args).catch((err) => {

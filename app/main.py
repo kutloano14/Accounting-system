@@ -1,32 +1,30 @@
 from pathlib import Path
 import logging
-from datetime import date, timedelta, datetime
+from datetime import date, timedelta
 import csv
 import io
 import json
 import re
 from uuid import uuid4
 
-from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile, Response
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 from fastapi.responses import FileResponse
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy import func
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
-from passlib.context import CryptContext
-from jose import JWTError, jwt
 
 from app import models, schemas
 from app.database import Base, engine, get_db
 from app.services.allocation import apply_allocation_rules
 from app.services.importer import import_bank_csv
 from app.services.finance import build_loan_schedule, months_between, straight_line_monthly_depreciation
+from app.services.payroll_rules import build_payroll_components
 from app.services.pdf_export import (
     build_invoice_pdf,
     build_employment_certificate_pdf,
@@ -45,62 +43,6 @@ from app.services.reports import (
     profit_and_loss,
     trial_balance,
 )
-
-# Auth constants
-SECRET_KEY = "your-secret-key-here"  # In production, use environment variable
-ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 30
-
-pwd_context = CryptContext(schemes=["pbkdf2_sha256"], deprecated="auto")
-security = HTTPBearer()
-
-def verify_password(plain_password, hashed_password):
-    return pwd_context.verify(plain_password, hashed_password)
-
-def get_password_hash(password):
-    return pwd_context.hash(password)
-
-def create_access_token(data: dict, expires_delta: timedelta | None = None):
-    to_encode = data.copy()
-    if expires_delta:
-        expire = datetime.utcnow() + expires_delta
-    else:
-        expire = datetime.utcnow() + timedelta(minutes=15)
-    to_encode.update({"exp": expire})
-    encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
-    return encoded_jwt
-
-def authenticate_user(db: Session, email: str, password: str):
-    user = db.query(models.User).filter(models.User.email == email).first()
-    if not user:
-        return False
-    if not verify_password(password, user.password_hash):
-        return False
-    return user
-
-def get_current_user(request: Request, db: Session = Depends(get_db)):
-    credentials_exception = HTTPException(
-        status_code=403,
-        detail="Not authenticated",
-        headers={"WWW-Authenticate": "Bearer"},
-    )
-    try:
-        token = request.cookies.get("access_token")
-        if not token:
-            raise credentials_exception
-        # Remove "Bearer " prefix if present
-        if token.startswith("Bearer "):
-            token = token[7:]
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        email: str = payload.get("sub")
-        if email is None:
-            raise credentials_exception
-    except JWTError:
-        raise credentials_exception
-    user = db.query(models.User).filter(models.User.email == email).first()
-    if user is None:
-        raise credentials_exception
-    return user
 
 BASE_DIR = Path(__file__).resolve().parent
 PAYROLL_DOCS_DIR = BASE_DIR / "uploads" / "payroll_documents"
@@ -179,6 +121,9 @@ def on_startup():
             "pension_rate": "ALTER TABLE payroll_runs ADD COLUMN pension_rate FLOAT DEFAULT 0.0",
             "sdl_rate": "ALTER TABLE payroll_runs ADD COLUMN sdl_rate FLOAT DEFAULT 0.0",
             "other_deduction_per_employee": "ALTER TABLE payroll_runs ADD COLUMN other_deduction_per_employee FLOAT DEFAULT 0.0",
+            "provident_mode": "ALTER TABLE payroll_runs ADD COLUMN provident_mode VARCHAR(30) DEFAULT 'fixed_amount'",
+            "provident_value": "ALTER TABLE payroll_runs ADD COLUMN provident_value FLOAT DEFAULT 0.0",
+            "provident_scope": "ALTER TABLE payroll_runs ADD COLUMN provident_scope VARCHAR(20) DEFAULT 'employee'",
             "payment_entry_id": "ALTER TABLE payroll_runs ADD COLUMN payment_entry_id INTEGER",
             "paid_date": "ALTER TABLE payroll_runs ADD COLUMN paid_date DATE",
         }
@@ -200,6 +145,10 @@ def on_startup():
 
         payroll_employee_cols = [row[1] for row in conn.execute(text("PRAGMA table_info(payroll_employees)"))]
         payroll_employee_alters = {
+            "initials": "ALTER TABLE payroll_employees ADD COLUMN initials VARCHAR(40) DEFAULT ''",
+            "surname": "ALTER TABLE payroll_employees ADD COLUMN surname VARCHAR(120) DEFAULT ''",
+            "address": "ALTER TABLE payroll_employees ADD COLUMN address VARCHAR(255) DEFAULT ''",
+            "nationality": "ALTER TABLE payroll_employees ADD COLUMN nationality VARCHAR(80) DEFAULT ''",
             "photo_url": "ALTER TABLE payroll_employees ADD COLUMN photo_url VARCHAR(500) DEFAULT ''",
             "id_number": "ALTER TABLE payroll_employees ADD COLUMN id_number VARCHAR(80) DEFAULT ''",
             "tax_number": "ALTER TABLE payroll_employees ADD COLUMN tax_number VARCHAR(80) DEFAULT ''",
@@ -208,8 +157,21 @@ def on_startup():
             "position": "ALTER TABLE payroll_employees ADD COLUMN position VARCHAR(120) DEFAULT ''",
             "hire_date": "ALTER TABLE payroll_employees ADD COLUMN hire_date DATE",
             "bank_account": "ALTER TABLE payroll_employees ADD COLUMN bank_account VARCHAR(120) DEFAULT ''",
+            "bank_name": "ALTER TABLE payroll_employees ADD COLUMN bank_name VARCHAR(120) DEFAULT ''",
+            "bank_branch": "ALTER TABLE payroll_employees ADD COLUMN bank_branch VARCHAR(120) DEFAULT ''",
+            "bank_account_type": "ALTER TABLE payroll_employees ADD COLUMN bank_account_type VARCHAR(40) DEFAULT ''",
             "nssa_number": "ALTER TABLE payroll_employees ADD COLUMN nssa_number VARCHAR(80) DEFAULT ''",
             "pension_number": "ALTER TABLE payroll_employees ADD COLUMN pension_number VARCHAR(80) DEFAULT ''",
+            "medical_aid_number": "ALTER TABLE payroll_employees ADD COLUMN medical_aid_number VARCHAR(80) DEFAULT ''",
+            "medical_aid_employee_amount": "ALTER TABLE payroll_employees ADD COLUMN medical_aid_employee_amount FLOAT DEFAULT 0.0",
+            "medical_aid_employer_amount": "ALTER TABLE payroll_employees ADD COLUMN medical_aid_employer_amount FLOAT DEFAULT 0.0",
+            "sick_fund_number": "ALTER TABLE payroll_employees ADD COLUMN sick_fund_number VARCHAR(80) DEFAULT ''",
+            "sick_fund_amount": "ALTER TABLE payroll_employees ADD COLUMN sick_fund_amount FLOAT DEFAULT 0.0",
+            "provident_fund_number": "ALTER TABLE payroll_employees ADD COLUMN provident_fund_number VARCHAR(80) DEFAULT ''",
+            "provident_fund_employee_rate": "ALTER TABLE payroll_employees ADD COLUMN provident_fund_employee_rate FLOAT DEFAULT 0.0",
+            "provident_fund_employer_rate": "ALTER TABLE payroll_employees ADD COLUMN provident_fund_employer_rate FLOAT DEFAULT 0.0",
+            "other_deduction_name": "ALTER TABLE payroll_employees ADD COLUMN other_deduction_name VARCHAR(120) DEFAULT ''",
+            "other_deduction_amount": "ALTER TABLE payroll_employees ADD COLUMN other_deduction_amount FLOAT DEFAULT 0.0",
         }
         for col, ddl in payroll_employee_alters.items():
             if col not in payroll_employee_cols:
@@ -233,43 +195,6 @@ def on_startup():
             conn.execute(text("UPDATE invoices SET outstanding_balance = COALESCE(total, 0) WHERE outstanding_balance IS NULL OR outstanding_balance = 0"))
 
         conn.commit()
-
-
-@app.post("/auth/register", response_model=schemas.UserOut)
-def register_user(user: schemas.UserCreate, db: Session = Depends(get_db)):
-    db_user = db.query(models.User).filter(models.User.email == user.email).first()
-    if db_user:
-        raise HTTPException(status_code=400, detail="Email already registered")
-    hashed_password = get_password_hash(user.password)
-    db_user = models.User(email=user.email, password_hash=hashed_password, full_name=user.full_name)
-    db.add(db_user)
-    db.commit()
-    db.refresh(db_user)
-    return db_user
-
-
-@app.post("/auth/login", response_model=schemas.Token)
-def login_user(user: schemas.UserLogin, response: Response, db: Session = Depends(get_db)):
-    db_user = authenticate_user(db, user.email, user.password)
-    if not db_user:
-        raise HTTPException(status_code=401, detail="Incorrect email or password")
-    access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-    access_token = create_access_token(
-        data={"sub": db_user.email}, expires_delta=access_token_expires
-    )
-    response.set_cookie(key="access_token", value=f"Bearer {access_token}", httponly=True)
-    return {"access_token": access_token, "token_type": "bearer"}
-
-
-@app.post("/auth/logout")
-def logout_user(response: Response):
-    response.delete_cookie(key="access_token")
-    return {"message": "Logged out successfully"}
-
-
-@app.get("/auth/me", response_model=schemas.UserOut)
-def get_current_user_info(current_user: models.User = Depends(get_current_user)):
-    return current_user
 
 
 @app.get("/health")
@@ -365,6 +290,10 @@ def _payroll_employee_payload(emp: models.PayrollEmployee) -> dict:
         "id": emp.id,
         "employee_code": emp.employee_code,
         "full_name": emp.full_name,
+        "initials": emp.initials,
+        "surname": emp.surname,
+        "address": emp.address,
+        "nationality": emp.nationality,
         "photo_url": emp.photo_url,
         "id_number": emp.id_number,
         "tax_number": emp.tax_number,
@@ -373,12 +302,54 @@ def _payroll_employee_payload(emp: models.PayrollEmployee) -> dict:
         "position": emp.position,
         "hire_date": emp.hire_date,
         "bank_account": emp.bank_account,
+        "bank_name": emp.bank_name,
+        "bank_branch": emp.bank_branch,
+        "bank_account_type": emp.bank_account_type,
         "nssa_number": emp.nssa_number,
         "pension_number": emp.pension_number,
+        "medical_aid_number": emp.medical_aid_number,
+        "medical_aid_employee_amount": float(emp.medical_aid_employee_amount or 0.0),
+        "medical_aid_employer_amount": float(emp.medical_aid_employer_amount or 0.0),
+        "sick_fund_number": emp.sick_fund_number,
+        "sick_fund_amount": float(emp.sick_fund_amount or 0.0),
+        "provident_fund_number": emp.provident_fund_number,
+        "provident_fund_employee_rate": float(emp.provident_fund_employee_rate or 0.0),
+        "provident_fund_employer_rate": float(emp.provident_fund_employer_rate or 0.0),
+        "other_deduction_name": emp.other_deduction_name,
+        "other_deduction_amount": float(emp.other_deduction_amount or 0.0),
         "default_gross_salary": float(emp.default_gross_salary or 0.0),
         "tax_rate": float(emp.tax_rate or 0.0),
         "active": emp.active,
     }
+
+
+def _validate_payroll_employee_input(payload: schemas.PayrollEmployeeCreate | schemas.PayrollEmployeeUpdate) -> tuple[str, str]:
+    code = payload.employee_code.strip()
+    name = payload.full_name.strip()
+    if not code or not name:
+        raise HTTPException(status_code=400, detail="employee_code and full_name are required")
+
+    non_negative_fields = {
+        "default_gross_salary": float(payload.default_gross_salary or 0.0),
+        "medical_aid_employee_amount": float(payload.medical_aid_employee_amount or 0.0),
+        "medical_aid_employer_amount": float(payload.medical_aid_employer_amount or 0.0),
+        "sick_fund_amount": float(payload.sick_fund_amount or 0.0),
+        "other_deduction_amount": float(payload.other_deduction_amount or 0.0),
+    }
+    for name_key, value in non_negative_fields.items():
+        if value < 0:
+            raise HTTPException(status_code=400, detail=f"{name_key} must be >= 0")
+
+    percent_fields = {
+        "tax_rate": float(payload.tax_rate or 0.0),
+        "provident_fund_employee_rate": float(payload.provident_fund_employee_rate or 0.0),
+        "provident_fund_employer_rate": float(payload.provident_fund_employer_rate or 0.0),
+    }
+    for name_key, value in percent_fields.items():
+        if value < 0 or value > 100:
+            raise HTTPException(status_code=400, detail=f"{name_key} must be between 0 and 100")
+
+    return code, name
 
 
 def _next_invoice_number(db: Session, company_id: int) -> str:
@@ -689,16 +660,6 @@ def _report_to_csv(report_name: str, data):
 
     output.seek(0)
     return output
-
-
-@app.get("/login", response_class=HTMLResponse)
-def login_page(request: Request):
-    return templates.TemplateResponse("login.html", {"request": request})
-
-
-@app.get("/register", response_class=HTMLResponse)
-def register_page(request: Request):
-    return templates.TemplateResponse("register.html", {"request": request})
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -2000,22 +1961,11 @@ def delete_rule(rule_id: int, company_id: int = 1, db: Session = Depends(get_db)
 def list_bank_transactions(
     company_id: int = 1,
     q: str | None = None,
-    account_id: int | None = None,
     from_date: date | None = None,
     to_date: date | None = None,
     db: Session = Depends(get_db),
 ):
     _resolve_company(db, company_id)
-
-    if account_id is not None:
-        account = (
-            db.query(models.Account)
-            .filter(models.Account.company_id == company_id, models.Account.id == account_id)
-            .first()
-        )
-        if not account:
-            raise HTTPException(status_code=404, detail="Account not found")
-
     query = db.query(models.BankTransaction).filter(models.BankTransaction.company_id == company_id)
 
     if q and q.strip():
@@ -2024,9 +1974,6 @@ def list_bank_transactions(
             (models.BankTransaction.description.ilike(needle))
             | (models.BankTransaction.reference.ilike(needle))
         )
-
-    if account_id is not None:
-        query = query.filter(models.BankTransaction.assigned_account_id == account_id)
 
     if from_date:
         query = query.filter(models.BankTransaction.txn_date >= from_date)
@@ -2035,86 +1982,6 @@ def list_bank_transactions(
 
     rows = query.order_by(models.BankTransaction.txn_date.desc(), models.BankTransaction.id.desc()).all()
     return [_bank_transaction_payload(txn) for txn in rows]
-
-
-@app.get("/bank/transactions/download")
-def download_bank_transactions(
-    company_id: int = 1,
-    format: str = "csv",
-    q: str | None = None,
-    account_id: int | None = None,
-    from_date: date | None = None,
-    to_date: date | None = None,
-    db: Session = Depends(get_db),
-):
-    _resolve_company(db, company_id)
-
-    if account_id is not None:
-        account = (
-            db.query(models.Account)
-            .filter(models.Account.company_id == company_id, models.Account.id == account_id)
-            .first()
-        )
-        if not account:
-            raise HTTPException(status_code=404, detail="Account not found")
-
-    query = db.query(models.BankTransaction).filter(models.BankTransaction.company_id == company_id)
-
-    if q and q.strip():
-        needle = f"%{q.strip()}%"
-        query = query.filter(
-            (models.BankTransaction.description.ilike(needle))
-            | (models.BankTransaction.reference.ilike(needle))
-        )
-
-    if account_id is not None:
-        query = query.filter(models.BankTransaction.assigned_account_id == account_id)
-
-    if from_date:
-        query = query.filter(models.BankTransaction.txn_date >= from_date)
-    if to_date:
-        query = query.filter(models.BankTransaction.txn_date <= to_date)
-
-    rows = query.order_by(models.BankTransaction.txn_date.desc(), models.BankTransaction.id.desc()).all()
-    data = [_bank_transaction_payload(txn) for txn in rows]
-
-    if format == "json":
-        raw = json.dumps(data, default=str, indent=2)
-        return StreamingResponse(
-            iter([raw]),
-            media_type="application/json",
-            headers={"Content-Disposition": "attachment; filename=bank-transactions.json"},
-        )
-
-    if format != "csv":
-        raise HTTPException(status_code=400, detail="Only csv or json formats are supported")
-
-    buffer = io.StringIO()
-    writer = csv.writer(buffer)
-    writer.writerow(["id", "txn_date", "description", "reference", "amount", "currency", "status", "account"])
-    for row in data:
-        writer.writerow(
-            [
-                row["id"],
-                row["txn_date"],
-                row["description"],
-                row["reference"],
-                row["amount"],
-                row["currency"],
-                row["status"],
-                row["assigned_account_name"] or "",
-            ]
-        )
-
-    total_amount = round(sum(float(x["amount"] or 0.0) for x in data), 2)
-    writer.writerow([])
-    writer.writerow(["", "", "TOTAL", "", total_amount, "", "", ""])
-
-    return StreamingResponse(
-        iter([buffer.getvalue()]),
-        media_type="text/csv",
-        headers={"Content-Disposition": "attachment; filename=bank-transactions.csv"},
-    )
 
 
 def _bank_transaction_payload(txn: models.BankTransaction) -> dict:
@@ -2596,15 +2463,7 @@ def loan_schedule(loan_id: int, months: int | None = None, company_id: int = 1, 
 @app.post("/payroll/employees")
 def create_payroll_employee(payload: schemas.PayrollEmployeeCreate, company_id: int = 1, db: Session = Depends(get_db)):
     _resolve_company(db, company_id)
-
-    code = payload.employee_code.strip()
-    name = payload.full_name.strip()
-    if not code or not name:
-        raise HTTPException(status_code=400, detail="employee_code and full_name are required")
-    if payload.default_gross_salary < 0:
-        raise HTTPException(status_code=400, detail="default_gross_salary must be >= 0")
-    if payload.tax_rate < 0 or payload.tax_rate > 100:
-        raise HTTPException(status_code=400, detail="tax_rate must be between 0 and 100")
+    code, name = _validate_payroll_employee_input(payload)
 
     exists = (
         db.query(models.PayrollEmployee)
@@ -2618,6 +2477,10 @@ def create_payroll_employee(payload: schemas.PayrollEmployeeCreate, company_id: 
         company_id=company_id,
         employee_code=code,
         full_name=name,
+        initials=payload.initials.strip(),
+        surname=payload.surname.strip(),
+        address=payload.address.strip(),
+        nationality=payload.nationality.strip(),
         photo_url=payload.photo_url.strip(),
         id_number=payload.id_number.strip(),
         tax_number=payload.tax_number.strip(),
@@ -2626,8 +2489,21 @@ def create_payroll_employee(payload: schemas.PayrollEmployeeCreate, company_id: 
         position=payload.position.strip(),
         hire_date=payload.hire_date,
         bank_account=payload.bank_account.strip(),
+        bank_name=payload.bank_name.strip(),
+        bank_branch=payload.bank_branch.strip(),
+        bank_account_type=payload.bank_account_type.strip(),
         nssa_number=payload.nssa_number.strip(),
         pension_number=payload.pension_number.strip(),
+        medical_aid_number=payload.medical_aid_number.strip(),
+        medical_aid_employee_amount=float(payload.medical_aid_employee_amount or 0.0),
+        medical_aid_employer_amount=float(payload.medical_aid_employer_amount or 0.0),
+        sick_fund_number=payload.sick_fund_number.strip(),
+        sick_fund_amount=float(payload.sick_fund_amount or 0.0),
+        provident_fund_number=payload.provident_fund_number.strip(),
+        provident_fund_employee_rate=float(payload.provident_fund_employee_rate or 0.0),
+        provident_fund_employer_rate=float(payload.provident_fund_employer_rate or 0.0),
+        other_deduction_name=payload.other_deduction_name.strip(),
+        other_deduction_amount=float(payload.other_deduction_amount or 0.0),
         default_gross_salary=payload.default_gross_salary,
         tax_rate=payload.tax_rate,
         active=payload.active,
@@ -2636,6 +2512,110 @@ def create_payroll_employee(payload: schemas.PayrollEmployeeCreate, company_id: 
     db.commit()
     db.refresh(employee)
     return _payroll_employee_payload(employee)
+
+
+@app.put("/payroll/employees/{employee_id}")
+def update_payroll_employee(
+    employee_id: int,
+    payload: schemas.PayrollEmployeeUpdate,
+    company_id: int = 1,
+    db: Session = Depends(get_db),
+):
+    _resolve_company(db, company_id)
+    employee = (
+        db.query(models.PayrollEmployee)
+        .filter(models.PayrollEmployee.company_id == company_id, models.PayrollEmployee.id == employee_id)
+        .first()
+    )
+    if not employee:
+        raise HTTPException(status_code=404, detail="Employee not found")
+
+    code, name = _validate_payroll_employee_input(payload)
+    exists = (
+        db.query(models.PayrollEmployee)
+        .filter(
+            models.PayrollEmployee.company_id == company_id,
+            models.PayrollEmployee.employee_code == code,
+            models.PayrollEmployee.id != employee_id,
+        )
+        .first()
+    )
+    if exists:
+        raise HTTPException(status_code=400, detail="Employee code already exists")
+
+    employee.employee_code = code
+    employee.full_name = name
+    employee.initials = payload.initials.strip()
+    employee.surname = payload.surname.strip()
+    employee.address = payload.address.strip()
+    employee.nationality = payload.nationality.strip()
+    employee.photo_url = payload.photo_url.strip()
+    employee.id_number = payload.id_number.strip()
+    employee.tax_number = payload.tax_number.strip()
+    employee.email = payload.email.strip()
+    employee.phone = payload.phone.strip()
+    employee.position = payload.position.strip()
+    employee.hire_date = payload.hire_date
+    employee.bank_account = payload.bank_account.strip()
+    employee.bank_name = payload.bank_name.strip()
+    employee.bank_branch = payload.bank_branch.strip()
+    employee.bank_account_type = payload.bank_account_type.strip()
+    employee.nssa_number = payload.nssa_number.strip()
+    employee.pension_number = payload.pension_number.strip()
+    employee.medical_aid_number = payload.medical_aid_number.strip()
+    employee.medical_aid_employee_amount = float(payload.medical_aid_employee_amount or 0.0)
+    employee.medical_aid_employer_amount = float(payload.medical_aid_employer_amount or 0.0)
+    employee.sick_fund_number = payload.sick_fund_number.strip()
+    employee.sick_fund_amount = float(payload.sick_fund_amount or 0.0)
+    employee.provident_fund_number = payload.provident_fund_number.strip()
+    employee.provident_fund_employee_rate = float(payload.provident_fund_employee_rate or 0.0)
+    employee.provident_fund_employer_rate = float(payload.provident_fund_employer_rate or 0.0)
+    employee.other_deduction_name = payload.other_deduction_name.strip()
+    employee.other_deduction_amount = float(payload.other_deduction_amount or 0.0)
+    employee.default_gross_salary = float(payload.default_gross_salary or 0.0)
+    employee.tax_rate = float(payload.tax_rate or 0.0)
+    employee.active = bool(payload.active)
+
+    db.commit()
+    db.refresh(employee)
+    return _payroll_employee_payload(employee)
+
+
+@app.delete("/payroll/employees/{employee_id}")
+def delete_payroll_employee(employee_id: int, company_id: int = 1, db: Session = Depends(get_db)):
+    _resolve_company(db, company_id)
+    employee = (
+        db.query(models.PayrollEmployee)
+        .filter(models.PayrollEmployee.company_id == company_id, models.PayrollEmployee.id == employee_id)
+        .first()
+    )
+    if not employee:
+        raise HTTPException(status_code=404, detail="Employee not found")
+
+    has_history = db.query(models.PayrollRunLine.id).filter(models.PayrollRunLine.employee_id == employee_id).first()
+    if has_history:
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot delete employee with payroll history. Set active to false instead.",
+        )
+
+    docs = (
+        db.query(models.PayrollEmployeeDocument)
+        .filter(
+            models.PayrollEmployeeDocument.company_id == company_id,
+            models.PayrollEmployeeDocument.employee_id == employee_id,
+        )
+        .all()
+    )
+    for doc in docs:
+        path = Path(doc.file_path)
+        if path.exists():
+            path.unlink(missing_ok=True)
+        db.delete(doc)
+
+    db.delete(employee)
+    db.commit()
+    return {"deleted": employee_id}
 
 
 def _payroll_run_out(run: models.PayrollRun) -> schemas.PayrollRunOut:
@@ -2656,6 +2636,9 @@ def _payroll_run_out(run: models.PayrollRun) -> schemas.PayrollRunOut:
         pension_rate=float(run.pension_rate or 0.0),
         sdl_rate=float(run.sdl_rate or 0.0),
         other_deduction_per_employee=float(run.other_deduction_per_employee or 0.0),
+        provident_mode=str(run.provident_mode or "fixed_amount"),
+        provident_value=float(run.provident_value or 0.0),
+        provident_scope=str(run.provident_scope or "employee"),
         expense_account_id=run.expense_account_id,
         payable_account_id=run.payable_account_id,
         tax_liability_account_id=run.tax_liability_account_id,
@@ -2684,6 +2667,9 @@ def _payroll_run_detail(run: models.PayrollRun) -> dict:
         "pension_rate": float(run.pension_rate or 0.0),
         "sdl_rate": float(run.sdl_rate or 0.0),
         "other_deduction_per_employee": float(run.other_deduction_per_employee or 0.0),
+        "provident_mode": str(run.provident_mode or "fixed_amount"),
+        "provident_value": float(run.provident_value or 0.0),
+        "provident_scope": str(run.provident_scope or "employee"),
         "expense_account_id": run.expense_account_id,
         "payable_account_id": run.payable_account_id,
         "tax_liability_account_id": run.tax_liability_account_id,
@@ -2889,6 +2875,25 @@ def download_payroll_employee_document(document_id: int, company_id: int = 1, db
         media_type=doc.content_type or "application/octet-stream",
         filename=doc.original_filename or doc.stored_filename,
     )
+
+
+@app.delete("/payroll/documents/{document_id}")
+def delete_payroll_employee_document(document_id: int, company_id: int = 1, db: Session = Depends(get_db)):
+    doc = (
+        db.query(models.PayrollEmployeeDocument)
+        .filter(models.PayrollEmployeeDocument.company_id == company_id, models.PayrollEmployeeDocument.id == document_id)
+        .first()
+    )
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    path = Path(doc.file_path)
+    if path.exists():
+        path.unlink(missing_ok=True)
+
+    db.delete(doc)
+    db.commit()
+    return {"deleted": document_id}
 
 
 @app.post("/payroll/employees/bulk")
@@ -3207,6 +3212,9 @@ def create_payroll_run(payload: schemas.PayrollRunCreate, company_id: int = 1, d
     pension_rate = float(payload.pension_rate or 0.0)
     sdl_rate = float(payload.sdl_rate or 0.0)
     other_deduction_per_employee = float(payload.other_deduction_per_employee or 0.0)
+    provident_mode = str(payload.provident_mode or "fixed_amount").strip().lower()
+    provident_scope = str(payload.provident_scope or "employee").strip().lower()
+    provident_value = float(payload.provident_value or 0.0)
 
     for rate_name, rate_value in {
         "paye_rate": paye_rate_default,
@@ -3218,6 +3226,14 @@ def create_payroll_run(payload: schemas.PayrollRunCreate, company_id: int = 1, d
             raise HTTPException(status_code=400, detail=f"{rate_name} must be between 0 and 100")
     if other_deduction_per_employee < 0:
         raise HTTPException(status_code=400, detail="other_deduction_per_employee must be >= 0")
+    if provident_mode not in {"fixed_amount", "percentage_of_gross"}:
+        raise HTTPException(status_code=400, detail="provident_mode must be 'fixed_amount' or 'percentage_of_gross'")
+    if provident_scope not in {"employee", "employer", "both"}:
+        raise HTTPException(status_code=400, detail="provident_scope must be employee, employer, or both")
+    if provident_value < 0:
+        raise HTTPException(status_code=400, detail="provident_value must be >= 0")
+    if provident_mode == "percentage_of_gross" and provident_value > 100:
+        raise HTTPException(status_code=400, detail="provident_value must be between 0 and 100 for percentage mode")
 
     run = models.PayrollRun(
         company_id=company_id,
@@ -3229,6 +3245,9 @@ def create_payroll_run(payload: schemas.PayrollRunCreate, company_id: int = 1, d
         pension_rate=pension_rate,
         sdl_rate=sdl_rate,
         other_deduction_per_employee=other_deduction_per_employee,
+        provident_mode=provident_mode,
+        provident_value=provident_value,
+        provident_scope=provident_scope,
         expense_account_id=payload.expense_account_id,
         payable_account_id=payload.payable_account_id,
         tax_liability_account_id=payload.tax_liability_account_id,
@@ -3250,9 +3269,91 @@ def create_payroll_run(payload: schemas.PayrollRunCreate, company_id: int = 1, d
         nssa_amount = round(gross * nssa_rate / 100.0, 2)
         pension_amount = round(gross * pension_rate / 100.0, 2)
         sdl_amount = round(gross * sdl_rate / 100.0, 2)
-        other_deduction = round(other_deduction_per_employee, 2)
-        total_deductions = round(tax + nssa_amount + pension_amount + other_deduction, 2)
-        net = round(max(gross - total_deductions, 0.0), 2)
+        base_other_deduction = round(other_deduction_per_employee, 2)
+
+        employee_rules: list[dict] = []
+        if provident_value > 0:
+            employee_rules.append(
+                {
+                    "name": "Provident Fund (Run)",
+                    "scope": provident_scope,
+                    "calculation_type": provident_mode,
+                    "value": provident_value,
+                }
+            )
+        if float(emp.medical_aid_employee_amount or 0.0) > 0:
+            employee_rules.append(
+                {
+                    "name": "Medical Aid (Employee)",
+                    "scope": "employee",
+                    "calculation_type": "fixed_amount",
+                    "value": float(emp.medical_aid_employee_amount or 0.0),
+                }
+            )
+        if float(emp.sick_fund_amount or 0.0) > 0:
+            employee_rules.append(
+                {
+                    "name": "Sick Fund",
+                    "scope": "employee",
+                    "calculation_type": "fixed_amount",
+                    "value": float(emp.sick_fund_amount or 0.0),
+                }
+            )
+        if float(emp.provident_fund_employee_rate or 0.0) > 0:
+            employee_rules.append(
+                {
+                    "name": "Provident Fund (Employee)",
+                    "scope": "employee",
+                    "calculation_type": "percentage_of_gross",
+                    "value": float(emp.provident_fund_employee_rate or 0.0),
+                }
+            )
+        if float(emp.other_deduction_amount or 0.0) > 0:
+            employee_rules.append(
+                {
+                    "name": emp.other_deduction_name or "Other Deduction",
+                    "scope": "employee",
+                    "calculation_type": "fixed_amount",
+                    "value": float(emp.other_deduction_amount or 0.0),
+                }
+            )
+        if float(emp.medical_aid_employer_amount or 0.0) > 0:
+            employee_rules.append(
+                {
+                    "name": "Medical Aid (Employer)",
+                    "scope": "employer",
+                    "calculation_type": "fixed_amount",
+                    "value": float(emp.medical_aid_employer_amount or 0.0),
+                }
+            )
+        if float(emp.provident_fund_employer_rate or 0.0) > 0:
+            employee_rules.append(
+                {
+                    "name": "Provident Fund (Employer)",
+                    "scope": "employer",
+                    "calculation_type": "percentage_of_gross",
+                    "value": float(emp.provident_fund_employer_rate or 0.0),
+                }
+            )
+
+        components = build_payroll_components(
+            gross=gross,
+            tax_amount=tax,
+            nssa_amount=nssa_amount,
+            pension_amount=pension_amount,
+            sdl_amount=0.0,
+            other_deduction=base_other_deduction,
+            rules=employee_rules,
+        )
+
+        total_deductions = round(float(components.get("employee_deductions_total") or 0.0), 2)
+        net = round(float(components.get("net_pay") or 0.0), 2)
+        other_deduction = round(max(total_deductions - tax - nssa_amount - pension_amount, 0.0), 2)
+        employer_contributions_total = round(
+            sdl_amount + float(components.get("employer_contributions_total") or 0.0),
+            2,
+        )
+
         line = models.PayrollRunLine(
             payroll_run_id=run.id,
             employee_id=emp.id,
@@ -3264,6 +3365,9 @@ def create_payroll_run(payload: schemas.PayrollRunCreate, company_id: int = 1, d
             sdl_amount=sdl_amount,
             total_deductions=total_deductions,
             net_pay=net,
+            employee_deductions_total=total_deductions,
+            employer_contributions_total=employer_contributions_total,
+            deductions_json=json.dumps(components.get("components") or []),
         )
         db.add(line)
         total_gross += gross

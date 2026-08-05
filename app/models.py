@@ -210,6 +210,10 @@ class PayrollEmployee(Base):
     company_id: Mapped[int] = mapped_column(ForeignKey("companies.id"), index=True, default=1)
     employee_code: Mapped[str] = mapped_column(String(40), index=True)
     full_name: Mapped[str] = mapped_column(String(160), index=True)
+    initials: Mapped[str] = mapped_column(String(40), default="")
+    surname: Mapped[str] = mapped_column(String(120), default="")
+    address: Mapped[str] = mapped_column(String(255), default="")
+    nationality: Mapped[str] = mapped_column(String(80), default="")
     photo_url: Mapped[str] = mapped_column(String(500), default="")
     id_number: Mapped[str] = mapped_column(String(80), default="")
     tax_number: Mapped[str] = mapped_column(String(80), default="")
@@ -218,8 +222,21 @@ class PayrollEmployee(Base):
     position: Mapped[str] = mapped_column(String(120), default="")
     hire_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     bank_account: Mapped[str] = mapped_column(String(120), default="")
+    bank_name: Mapped[str] = mapped_column(String(120), default="")
+    bank_branch: Mapped[str] = mapped_column(String(120), default="")
+    bank_account_type: Mapped[str] = mapped_column(String(40), default="")
     nssa_number: Mapped[str] = mapped_column(String(80), default="")
     pension_number: Mapped[str] = mapped_column(String(80), default="")
+    medical_aid_number: Mapped[str] = mapped_column(String(80), default="")
+    medical_aid_employee_amount: Mapped[float] = mapped_column(Float, default=0.0)
+    medical_aid_employer_amount: Mapped[float] = mapped_column(Float, default=0.0)
+    sick_fund_number: Mapped[str] = mapped_column(String(80), default="")
+    sick_fund_amount: Mapped[float] = mapped_column(Float, default=0.0)
+    provident_fund_number: Mapped[str] = mapped_column(String(80), default="")
+    provident_fund_employee_rate: Mapped[float] = mapped_column(Float, default=0.0)
+    provident_fund_employer_rate: Mapped[float] = mapped_column(Float, default=0.0)
+    other_deduction_name: Mapped[str] = mapped_column(String(120), default="")
+    other_deduction_amount: Mapped[float] = mapped_column(Float, default=0.0)
     default_gross_salary: Mapped[float] = mapped_column(Float, default=0.0)
     tax_rate: Mapped[float] = mapped_column(Float, default=0.0)
     active: Mapped[bool] = mapped_column(Boolean, default=True)
@@ -249,6 +266,9 @@ class PayrollRun(Base):
     pension_rate: Mapped[float] = mapped_column(Float, default=0.0)
     sdl_rate: Mapped[float] = mapped_column(Float, default=0.0)
     other_deduction_per_employee: Mapped[float] = mapped_column(Float, default=0.0)
+    provident_mode: Mapped[str] = mapped_column(String(30), default="fixed_amount")
+    provident_value: Mapped[float] = mapped_column(Float, default=0.0)
+    provident_scope: Mapped[str] = mapped_column(String(20), default="employee")
     expense_account_id: Mapped[int] = mapped_column(ForeignKey("accounts.id"))
     payable_account_id: Mapped[int] = mapped_column(ForeignKey("accounts.id"))
     tax_liability_account_id: Mapped[int | None] = mapped_column(ForeignKey("accounts.id"), nullable=True)
@@ -280,9 +300,27 @@ class PayrollRunLine(Base):
     sdl_amount: Mapped[float] = mapped_column(Float, default=0.0)
     total_deductions: Mapped[float] = mapped_column(Float, default=0.0)
     net_pay: Mapped[float] = mapped_column(Float, default=0.0)
+    employee_deductions_total: Mapped[float] = mapped_column(Float, default=0.0)
+    employer_contributions_total: Mapped[float] = mapped_column(Float, default=0.0)
+    deductions_json: Mapped[str] = mapped_column(String(2000), default="[]")
 
     payroll_run = relationship("PayrollRun", back_populates="lines")
     employee = relationship("PayrollEmployee")
+
+
+class PayrollRule(Base):
+    __tablename__ = "payroll_rules"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    company_id: Mapped[int] = mapped_column(ForeignKey("companies.id"), index=True, default=1)
+    name: Mapped[str] = mapped_column(String(120), index=True)
+    scope: Mapped[str] = mapped_column(String(20), default="employee")
+    calculation_type: Mapped[str] = mapped_column(String(30), default="fixed_amount")
+    value: Mapped[float] = mapped_column(Float, default=0.0)
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    order_index: Mapped[int] = mapped_column(Integer, default=1)
+
+    company = relationship("Company")
 
 
 class PayrollTaxBracket(Base):

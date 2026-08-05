@@ -150,6 +150,10 @@ class CompanyProfileUpdate(BaseModel):
 class CompanyCreate(BaseModel):
     name: str
 
+    initials: str = ""
+    surname: str = ""
+    address: str = ""
+    nationality: str = ""
 
 class CompanyOut(BaseModel):
     id: int
@@ -158,7 +162,33 @@ class CompanyOut(BaseModel):
 
 class PayrollEmployeeCreate(BaseModel):
     employee_code: str
+    bank_name: str = ""
+    bank_branch: str = ""
+    bank_account_type: str = ""
     full_name: str
+    photo_url: str = ""
+    medical_aid_number: str = ""
+    medical_aid_employee_amount: float = 0.0
+    medical_aid_employer_amount: float = 0.0
+    sick_fund_number: str = ""
+    sick_fund_amount: float = 0.0
+    provident_fund_number: str = ""
+    provident_fund_employee_rate: float = 0.0
+    provident_fund_employer_rate: float = 0.0
+    other_deduction_name: str = ""
+    other_deduction_amount: float = 0.0
+    id_number: str = ""
+    tax_number: str = ""
+    email: str = ""
+    phone: str = ""
+
+class PayrollEmployeeUpdate(BaseModel):
+    employee_code: str
+    full_name: str
+    initials: str = ""
+    surname: str = ""
+    address: str = ""
+    nationality: str = ""
     photo_url: str = ""
     id_number: str = ""
     tax_number: str = ""
@@ -167,7 +197,34 @@ class PayrollEmployeeCreate(BaseModel):
     position: str = ""
     hire_date: date | None = None
     bank_account: str = ""
+    bank_name: str = ""
+    bank_branch: str = ""
+    bank_account_type: str = ""
     nssa_number: str = ""
+    pension_number: str = ""
+    medical_aid_number: str = ""
+    medical_aid_employee_amount: float = 0.0
+    medical_aid_employer_amount: float = 0.0
+    sick_fund_number: str = ""
+    sick_fund_amount: float = 0.0
+    provident_fund_number: str = ""
+    provident_fund_employee_rate: float = 0.0
+    provident_fund_employer_rate: float = 0.0
+    other_deduction_name: str = ""
+    other_deduction_amount: float = 0.0
+    default_gross_salary: float
+    tax_rate: float = 0.0
+    active: bool = True
+
+
+    position: str = ""
+    hire_date: date | None = None
+    bank_account: str = ""
+    nssa_number: str = ""
+    initials: str = ""
+    surname: str = ""
+    address: str = ""
+    nationality: str = ""
     pension_number: str = ""
     default_gross_salary: float
     tax_rate: float = 0.0
@@ -176,8 +233,21 @@ class PayrollEmployeeCreate(BaseModel):
 
 class PayrollEmployeeOut(BaseModel):
     id: int
+    bank_name: str = ""
+    bank_branch: str = ""
+    bank_account_type: str = ""
     employee_code: str
     full_name: str
+    medical_aid_number: str = ""
+    medical_aid_employee_amount: float = 0.0
+    medical_aid_employer_amount: float = 0.0
+    sick_fund_number: str = ""
+    sick_fund_amount: float = 0.0
+    provident_fund_number: str = ""
+    provident_fund_employee_rate: float = 0.0
+    provident_fund_employer_rate: float = 0.0
+    other_deduction_name: str = ""
+    other_deduction_amount: float = 0.0
     photo_url: str = ""
     id_number: str = ""
     tax_number: str = ""
@@ -231,6 +301,9 @@ class PayrollRunCreate(BaseModel):
     pension_rate: float = 0.0
     sdl_rate: float = 0.0
     other_deduction_per_employee: float = 0.0
+    provident_mode: str = "fixed_amount"
+    provident_value: float = 0.0
+    provident_scope: str = "employee"
     employee_ids: list[int] | None = None
 
 
@@ -247,30 +320,6 @@ class PayrollRunLineOut(BaseModel):
     sdl_amount: float
     total_deductions: float
     net_pay: float
-
-
-class UserCreate(BaseModel):
-    email: str
-    password: str
-    full_name: str
-
-
-class UserLogin(BaseModel):
-    email: str
-    password: str
-
-
-class UserOut(BaseModel):
-    id: int
-    email: str
-    full_name: str
-    is_active: bool
-    created_at: datetime
-
-
-class Token(BaseModel):
-    access_token: str
-    token_type: str
 
 
 class PayrollRunOut(BaseModel):
@@ -290,6 +339,9 @@ class PayrollRunOut(BaseModel):
     pension_rate: float
     sdl_rate: float
     other_deduction_per_employee: float
+    provident_mode: str = "fixed_amount"
+    provident_value: float = 0.0
+    provident_scope: str = "employee"
     expense_account_id: int
     payable_account_id: int
     tax_liability_account_id: int | None = None
