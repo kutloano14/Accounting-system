@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from io import BytesIO
 
 from reportlab.lib import colors
@@ -69,6 +70,18 @@ def _table(data: list[list], col_widths=None, extra_styles: list[tuple] | None =
 
 def _fmt_money(value) -> str:
     return f"{float(value or 0):,.2f}"
+
+
+def _fmt_date(value) -> str:
+    if value is None:
+        return ""
+    if hasattr(value, "strftime"):
+        return value.strftime("%Y/%m/%d")
+    return str(value)
+
+
+def _fmt_number(value, decimals: int = 4) -> str:
+    return f"{float(value or 0):,.{decimals}f}"
 
 
 def _map_rows_by_code(rows: list[dict]) -> dict[str, dict]:
@@ -403,6 +416,244 @@ def build_payroll_run_pdf(run_data: dict, company_profile: dict) -> bytes:
     return buf.getvalue()
 
 
+def build_irp5_context(run_data: dict, employee_line: dict, company_profile: dict, employee_details: dict | None = None) -> dict:
+    employee = employee_details or {}
+    employee_code = (employee_line.get("employee_code") or "").replace(" ", "")
+    pay_date = run_data.get("pay_date")
+    tax_year = str(run_data.get("transaction_year") or (pay_date.year if hasattr(pay_date, "year") else ""))
+    reconciliation_period = str(run_data.get("reconciliation_period") or f"{tax_year}02" if tax_year else "")
+    certificate_number = str(
+        run_data.get("certificate_number")
+        or f"{(company_profile.get('tax_number') or '').replace(' ', '')}{reconciliation_period}{employee_code}"
+    )
+
+    paye_amount = float(employee_line.get("tax_amount", 0) or 0)
+    uif_amount = float(employee_line.get("nssa_amount", 0) or 0)
+    sdl_amount = float(employee_line.get("sdl_amount", 0) or 0)
+    annual_payment = float(employee_line.get("annual_payment", 0) or 0)
+    provident_contributions = float(employee_line.get("pension_amount", 0) or 0)
+
+    gross_income = float(employee_line.get("gross_pay", 0) or 0)
+    gross_taxable = gross_income + annual_payment + provident_contributions
+
+    deductions_total = float(employee_line.get("employee_deductions_total", 0) or 0)
+    employer_pf_contributions = float(employee_line.get("employer_contributions_total", 0) or 0)
+
+    return {
+        "period_label": run_data.get("period_label", ""),
+        "certificate": {
+            "title": "Employee Income Tax Certificate IRP5/IT3(a)",
+            "transaction_year": tax_year,
+            "reconciliation_period": reconciliation_period,
+            "year_of_assessment": str(run_data.get("year_of_assessment") or tax_year),
+            "certificate_number": certificate_number,
+            "certificate_type": str(run_data.get("certificate_type") or "IRP5"),
+        },
+        "employer": {
+            "company_name": company_profile.get("company_name") or "My Company",
+            "address": company_profile.get("address") or "",
+            "email": company_profile.get("email") or "",
+            "phone": company_profile.get("phone") or "",
+            "tax_number": company_profile.get("tax_number") or "",
+        },
+        "employee": {
+            "full_name": employee.get("full_name") or employee_line.get("employee_name") or "",
+            "initials": employee.get("initials") or "",
+            "surname": employee.get("surname") or "",
+            "address": employee.get("address") or "",
+            "nationality": employee.get("nationality") or "",
+            "id_number": employee.get("id_number") or employee_line.get("id_number") or "",
+            "tax_number": employee.get("tax_number") or employee_line.get("tax_number") or "",
+            "bank_account": employee.get("bank_account") or employee_line.get("bank_account") or "",
+            "bank_name": employee.get("bank_name") or "",
+            "bank_branch": employee.get("bank_branch") or "",
+            "bank_account_type": employee.get("bank_account_type") or "",
+            "email": employee.get("email") or "",
+            "phone": employee.get("phone") or "",
+            "date_of_birth": employee.get("date_of_birth") or "",
+            "passport_number": employee.get("passport_number") or "",
+            "passport_country": employee.get("passport_country") or "",
+            "employee_code": employee_line.get("employee_code") or "",
+            "gross_pay": employee_line.get("gross_pay", 0),
+            "tax_amount": employee_line.get("tax_amount", 0),
+            "nssa_amount": employee_line.get("nssa_amount", 0),
+            "pension_amount": employee_line.get("pension_amount", 0),
+            "other_deduction": employee_line.get("other_deduction", 0),
+            "sdl_amount": employee_line.get("sdl_amount", 0),
+            "employee_deductions_total": employee_line.get("employee_deductions_total", 0),
+            "employer_contributions_total": employee_line.get("employer_contributions_total", 0),
+            "net_pay": employee_line.get("net_pay", 0),
+        },
+        "employment": {
+            "periods_in_year": float(run_data.get("periods_in_year") or 12),
+            "periods_worked": float(run_data.get("periods_worked") or 12),
+            "period_employed_from": _fmt_date(employee.get("hire_date") or run_data.get("period_employed_from") or ""),
+            "period_employed_to": _fmt_date(run_data.get("period_employed_to") or run_data.get("pay_date") or ""),
+        },
+        "coded_amounts": {
+            "tax_withheld": [
+                {"description": "PAYE", "amount": paye_amount, "code": "4102"},
+                {"description": "PAYE on Lump Sum Benefit", "amount": float(employee_line.get("paye_lump_sum", 0) or 0), "code": "4115"},
+                {
+                    "description": "Additional Medical Tax Credits",
+                    "amount": float(employee_line.get("additional_medical_tax_credits", 0) or 0),
+                    "code": "4120",
+                },
+                {"description": "Employee and Employer UIF", "amount": uif_amount, "code": "4141"},
+                {"description": "Employer SDL contribution", "amount": sdl_amount, "code": "4142"},
+                {
+                    "description": "Total Tax, UIF and SDL",
+                    "amount": paye_amount + uif_amount + sdl_amount,
+                    "code": "4149",
+                },
+                {"description": "Medical Tax Credit", "amount": float(employee_line.get("medical_tax_credit", 0) or 0), "code": "4116"},
+                {
+                    "description": "Reason for non deduction of employees tax",
+                    "amount": "",
+                    "code": "4150",
+                    "text_value": str(employee_line.get("non_deduction_reason") or ""),
+                },
+            ],
+            "income_received": [
+                {"description": "Income", "amount": gross_income, "code": "3601"},
+                {"description": "Annual Payment", "amount": annual_payment, "code": "3605"},
+                {"description": "Provident Fund contributions", "amount": provident_contributions, "code": "3825"},
+                {"description": "Gross employment income (taxable)", "amount": gross_taxable, "code": "3699"},
+            ],
+            "deductions_contributions": [
+                {
+                    "description": "Current and Arrear Provident Fund Contributions",
+                    "amount": deductions_total,
+                    "code": "4003",
+                },
+                {
+                    "description": "Employer's provident fund contributions paid for the benefit of employee",
+                    "amount": employer_pf_contributions,
+                    "code": "4473",
+                },
+                {
+                    "description": "Total Deductions/Contributions",
+                    "amount": deductions_total + employer_pf_contributions,
+                    "code": "4497",
+                },
+            ],
+        },
+    }
+
+
+def build_irp5_pdf(run_data: dict, employee_line: dict, company_profile: dict, employee_details: dict | None = None) -> bytes:
+    buf = BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=A4, leftMargin=18 * mm, rightMargin=18 * mm, topMargin=18 * mm, bottomMargin=18 * mm)
+    story = []
+    context = build_irp5_context(run_data, employee_line, company_profile, employee_details)
+    certificate = context["certificate"]
+    employer = context["employer"]
+    employee = context["employee"]
+    employment = context["employment"]
+    coded_amounts = context["coded_amounts"]
+
+    _title_block(story, certificate["title"], company_profile, None)
+    story.append(_table([
+        ["Transaction year", "Period of reconciliation", "Year of assessment"],
+        [certificate.get("transaction_year", ""), certificate.get("reconciliation_period", ""), certificate.get("year_of_assessment", "")],
+    ], col_widths=[56 * mm, 56 * mm, 56 * mm]))
+    story.append(Spacer(1, 2 * mm))
+    story.append(_table([
+        ["Certificate number", "Type of certificate"],
+        [certificate.get("certificate_number", ""), certificate.get("certificate_type", "IRP5")],
+    ], col_widths=[112 * mm, 56 * mm]))
+
+    story.append(Spacer(1, 4 * mm))
+    story.append(Paragraph("<b>Employee Information</b>", getSampleStyleSheet()["Heading4"]))
+    story.append(_table([
+        ["Surname/Trading name", "Employee code", "Initials", "Date of birth"],
+        [
+            employee.get("surname", ""),
+            employee.get("employee_code", ""),
+            employee.get("initials", ""),
+            employee.get("date_of_birth", ""),
+        ],
+        ["First names", "ID number", "Passport number", "Tax reference no."],
+        [
+            employee.get("full_name", ""),
+            employee.get("id_number", ""),
+            employee.get("passport_number", ""),
+            employee.get("tax_number", ""),
+        ],
+        ["Home/Business/Cell", "Email", "Nationality", "Passport country"],
+        [
+            employee.get("phone", ""),
+            employee.get("email", ""),
+            employee.get("nationality", ""),
+            employee.get("passport_country", ""),
+        ],
+    ], col_widths=[44 * mm, 44 * mm, 44 * mm, 44 * mm]))
+
+    story.append(Spacer(1, 3 * mm))
+    story.append(Paragraph("<b>Employee Address and Remuneration Bank Account Details</b>", getSampleStyleSheet()["Heading4"]))
+    story.append(_table([
+        ["Residential/Postal Address", "Account holder name", "Bank name", "Branch name"],
+        [
+            employee.get("address", ""),
+            employee.get("full_name", ""),
+            employee.get("bank_name", ""),
+            employee.get("bank_branch", ""),
+        ],
+        ["Branch number", "Account number", "Account holder relationship", "Account type"],
+        ["", employee.get("bank_account", ""), "Own", employee.get("bank_account_type", "")],
+    ], col_widths=[44 * mm, 44 * mm, 44 * mm, 44 * mm]))
+
+    story.append(Spacer(1, 3 * mm))
+    story.append(Paragraph("<b>Employer Information</b>", getSampleStyleSheet()["Heading4"]))
+    story.append(_table([
+        ["Field", "Value"],
+        ["Trading or other name", employer.get("company_name", "")],
+        ["PAYE ref. no.", employer.get("tax_number", "")],
+        ["SDL ref. no.", company_profile.get("sdl_number", "")],
+        ["UIF ref. no.", company_profile.get("uif_number", "")],
+        ["Address", employer.get("address", "")],
+        ["Email", employer.get("email", "")],
+        ["Phone", employer.get("phone", "")],
+    ], col_widths=[70 * mm, 100 * mm]))
+
+    story.append(Spacer(1, 4 * mm))
+    story.append(Paragraph("<b>Tax Certificate Information</b>", getSampleStyleSheet()["Heading4"]))
+    story.append(_table([
+        ["Field", "Value"],
+        ["Periods in year of assessment", _fmt_number(employment.get("periods_in_year", 12), 4)],
+        ["Number of periods worked", _fmt_number(employment.get("periods_worked", 12), 4)],
+        ["Period employed from", employment.get("period_employed_from", "")],
+        ["Period employed to", employment.get("period_employed_to", "")],
+    ], col_widths=[70 * mm, 100 * mm]))
+
+    story.append(Spacer(1, 4 * mm))
+    story.append(Paragraph("<b>Tax Withheld</b>", getSampleStyleSheet()["Heading4"]))
+    tax_rows = [["Description", "Amount", "Code"]]
+    for row in coded_amounts.get("tax_withheld", []):
+        text_value = row.get("text_value")
+        amount = row.get("amount", "")
+        amount_value = text_value if text_value is not None and text_value != "" else (_fmt_money(amount) if amount != "" else "")
+        tax_rows.append([row.get("description", ""), amount_value, row.get("code", "")])
+    story.append(_table(tax_rows, col_widths=[96 * mm, 45 * mm, 29 * mm], extra_styles=[("ALIGN", (1, 1), (1, -1), "RIGHT")]))
+
+    story.append(Spacer(1, 3 * mm))
+    story.append(Paragraph("<b>Income Received</b>", getSampleStyleSheet()["Heading4"]))
+    income_rows = [["Description", "Amount", "Code"]]
+    for row in coded_amounts.get("income_received", []):
+        income_rows.append([row.get("description", ""), _fmt_money(row.get("amount", 0)), row.get("code", "")])
+    story.append(_table(income_rows, col_widths=[96 * mm, 45 * mm, 29 * mm], extra_styles=[("ALIGN", (1, 1), (1, -1), "RIGHT")]))
+
+    story.append(Spacer(1, 3 * mm))
+    story.append(Paragraph("<b>Deductions/Contributions</b>", getSampleStyleSheet()["Heading4"]))
+    contribution_rows = [["Description", "Amount", "Code"]]
+    for row in coded_amounts.get("deductions_contributions", []):
+        contribution_rows.append([row.get("description", ""), _fmt_money(row.get("amount", 0)), row.get("code", "")])
+    story.append(_table(contribution_rows, col_widths=[96 * mm, 45 * mm, 29 * mm], extra_styles=[("ALIGN", (1, 1), (1, -1), "RIGHT")]))
+
+    doc.build(story)
+    return buf.getvalue()
+
+
 def build_payroll_payslip_pdf(run_data: dict, employee_line: dict, company_profile: dict) -> bytes:
     buf = BytesIO()
     doc = SimpleDocTemplate(buf, pagesize=A4, leftMargin=18 * mm, rightMargin=18 * mm, topMargin=18 * mm, bottomMargin=18 * mm)
@@ -427,9 +678,21 @@ def build_payroll_payslip_pdf(run_data: dict, employee_line: dict, company_profi
         ["Pension", _fmt_money(employee_line.get("pension_amount", 0))],
         ["Other Deductions", _fmt_money(employee_line.get("other_deduction", 0))],
         ["SDL", _fmt_money(employee_line.get("sdl_amount", 0))],
-        ["Total Deductions", _fmt_money(employee_line.get("total_deductions", 0))],
-        ["Net Pay", _fmt_money(employee_line.get("net_pay", 0))],
     ]
+    deductions_json = employee_line.get("deductions_json") or []
+    if isinstance(deductions_json, str):
+        try:
+            deductions_json = json.loads(deductions_json)
+        except Exception:
+            deductions_json = []
+    for item in deductions_json:
+        if item.get("scope") in {"employee", "both"}:
+            pay_rows.append([f"{item.get('name', 'Rule')} (deduction)", _fmt_money(item.get('amount', 0))])
+    pay_rows.extend([
+        ["Employee Deductions Total", _fmt_money(employee_line.get("employee_deductions_total", 0))],
+        ["Employer Contributions Total", _fmt_money(employee_line.get("employer_contributions_total", 0))],
+        ["Net Pay", _fmt_money(employee_line.get("net_pay", 0))],
+    ])
     pay_tbl = _table(pay_rows, col_widths=[90 * mm, 70 * mm], extra_styles=[("FONTNAME", (0, len(pay_rows) - 1), (-1, len(pay_rows) - 1), "Helvetica-Bold")])
     story.append(pay_tbl)
 
