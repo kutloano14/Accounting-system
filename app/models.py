@@ -155,7 +155,11 @@ class CompanyProfile(Base):
     email: Mapped[str] = mapped_column(String(120), default="")
     phone: Mapped[str] = mapped_column(String(60), default="")
     tax_number: Mapped[str] = mapped_column(String(80), default="")
+    paye_ref_no: Mapped[str] = mapped_column(String(80), default="")
+    sdl_ref_no: Mapped[str] = mapped_column(String(80), default="")
+    uif_ref_no: Mapped[str] = mapped_column(String(80), default="")
     currency: Mapped[str] = mapped_column(String(10), default="USD")
+    logo_data_url: Mapped[str] = mapped_column(String(50000), default="")
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     __table_args__ = (UniqueConstraint("company_id", name="uq_company_profile_company"),)
@@ -212,6 +216,7 @@ class PayrollEmployee(Base):
     full_name: Mapped[str] = mapped_column(String(160), index=True)
     initials: Mapped[str] = mapped_column(String(40), default="")
     surname: Mapped[str] = mapped_column(String(120), default="")
+    date_of_birth: Mapped[date | None] = mapped_column(Date, nullable=True)
     address: Mapped[str] = mapped_column(String(255), default="")
     nationality: Mapped[str] = mapped_column(String(80), default="")
     photo_url: Mapped[str] = mapped_column(String(500), default="")
@@ -266,9 +271,13 @@ class PayrollRun(Base):
     pension_rate: Mapped[float] = mapped_column(Float, default=0.0)
     sdl_rate: Mapped[float] = mapped_column(Float, default=0.0)
     other_deduction_per_employee: Mapped[float] = mapped_column(Float, default=0.0)
+    financial_year_label: Mapped[str] = mapped_column(String(40), default="")
     provident_mode: Mapped[str] = mapped_column(String(30), default="fixed_amount")
     provident_value: Mapped[float] = mapped_column(Float, default=0.0)
     provident_scope: Mapped[str] = mapped_column(String(20), default="employee")
+    provident_employee_rate: Mapped[float] = mapped_column(Float, default=0.0)
+    provident_employer_rate: Mapped[float] = mapped_column(Float, default=0.0)
+    provident_locked: Mapped[bool] = mapped_column(Boolean, default=False)
     expense_account_id: Mapped[int] = mapped_column(ForeignKey("accounts.id"))
     payable_account_id: Mapped[int] = mapped_column(ForeignKey("accounts.id"))
     tax_liability_account_id: Mapped[int | None] = mapped_column(ForeignKey("accounts.id"), nullable=True)
@@ -292,6 +301,7 @@ class PayrollRunLine(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
     payroll_run_id: Mapped[int] = mapped_column(ForeignKey("payroll_runs.id"), index=True)
     employee_id: Mapped[int] = mapped_column(ForeignKey("payroll_employees.id"), index=True)
+    basic_pay: Mapped[float] = mapped_column(Float, default=0.0)
     gross_pay: Mapped[float] = mapped_column(Float, default=0.0)
     tax_amount: Mapped[float] = mapped_column(Float, default=0.0)
     nssa_amount: Mapped[float] = mapped_column(Float, default=0.0)
@@ -302,6 +312,8 @@ class PayrollRunLine(Base):
     net_pay: Mapped[float] = mapped_column(Float, default=0.0)
     employee_deductions_total: Mapped[float] = mapped_column(Float, default=0.0)
     employer_contributions_total: Mapped[float] = mapped_column(Float, default=0.0)
+    provident_employee_rate: Mapped[float] = mapped_column(Float, default=0.0)
+    provident_employer_rate: Mapped[float] = mapped_column(Float, default=0.0)
     deductions_json: Mapped[str] = mapped_column(String(2000), default="[]")
 
     payroll_run = relationship("PayrollRun", back_populates="lines")
@@ -332,6 +344,52 @@ class PayrollTaxBracket(Base):
     upper_limit: Mapped[float | None] = mapped_column(Float, nullable=True)
     rate_percent: Mapped[float] = mapped_column(Float, default=0.0)
     order_index: Mapped[int] = mapped_column(Integer, default=1)
+
+    company = relationship("Company")
+
+
+class PayrollPayeTableUpload(Base):
+    __tablename__ = "payroll_paye_table_uploads"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    company_id: Mapped[int] = mapped_column(ForeignKey("companies.id"), index=True, default=1)
+    source_filename: Mapped[str] = mapped_column(String(255), default="")
+    effective_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    tax_year_label: Mapped[str] = mapped_column(String(40), default="")
+    revision: Mapped[str] = mapped_column(String(40), default="")
+    uploaded_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    company = relationship("Company")
+    rows = relationship("PayrollPayeTableRow", back_populates="upload", cascade="all, delete-orphan")
+
+
+class PayrollPayeTableRow(Base):
+    __tablename__ = "payroll_paye_table_rows"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    upload_id: Mapped[int] = mapped_column(ForeignKey("payroll_paye_table_uploads.id"), index=True)
+    remuneration_from: Mapped[float] = mapped_column(Float, default=0.0)
+    remuneration_to: Mapped[float] = mapped_column(Float, default=0.0)
+    annual_equivalent: Mapped[float] = mapped_column(Float, default=0.0)
+    tax_under_65: Mapped[float] = mapped_column(Float, default=0.0)
+    tax_65_to_74: Mapped[float] = mapped_column(Float, default=0.0)
+    tax_over_75: Mapped[float] = mapped_column(Float, default=0.0)
+
+    upload = relationship("PayrollPayeTableUpload", back_populates="rows")
+
+
+class PayrollProvidentPolicy(Base):
+    __tablename__ = "payroll_provident_policies"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    company_id: Mapped[int] = mapped_column(ForeignKey("companies.id"), index=True, default=1)
+    financial_year_label: Mapped[str] = mapped_column(String(40), index=True)
+    employee_rate: Mapped[float] = mapped_column(Float, default=0.0)
+    employer_rate: Mapped[float] = mapped_column(Float, default=0.0)
+    locked: Mapped[bool] = mapped_column(Boolean, default=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    __table_args__ = (UniqueConstraint("company_id", "financial_year_label", name="uq_provident_policy_company_year"),)
 
     company = relationship("Company")
 
