@@ -144,7 +144,26 @@ class CompanyProfileUpdate(BaseModel):
     email: str = ""
     phone: str = ""
     tax_number: str = ""
+    paye_ref_no: str = ""
+    sdl_ref_no: str = ""
+    uif_ref_no: str = ""
     currency: str = "USD"
+    logo_data_url: str = ""
+
+
+class PayrollProvidentPolicyUpdate(BaseModel):
+    financial_year_label: str
+    employee_rate: float = 0.0
+    employer_rate: float = 0.0
+    locked: bool = True
+    apply_to_existing_runs: bool = False
+
+
+class PayrollProvidentPolicyOut(BaseModel):
+    financial_year_label: str
+    employee_rate: float
+    employer_rate: float
+    locked: bool
 
 
 class CompanyCreate(BaseModel):
@@ -162,10 +181,15 @@ class CompanyOut(BaseModel):
 
 class PayrollEmployeeCreate(BaseModel):
     employee_code: str
+    full_name: str
+    initials: str = ""
+    surname: str = ""
+    date_of_birth: date | None = None
+    address: str = ""
+    nationality: str = ""
     bank_name: str = ""
     bank_branch: str = ""
     bank_account_type: str = ""
-    full_name: str
     photo_url: str = ""
     medical_aid_number: str = ""
     medical_aid_employee_amount: float = 0.0
@@ -181,12 +205,21 @@ class PayrollEmployeeCreate(BaseModel):
     tax_number: str = ""
     email: str = ""
     phone: str = ""
+    position: str = ""
+    hire_date: date | None = None
+    bank_account: str = ""
+    nssa_number: str = ""
+    pension_number: str = ""
+    default_gross_salary: float = 0.0
+    tax_rate: float = 0.0
+    active: bool = True
 
 class PayrollEmployeeUpdate(BaseModel):
     employee_code: str
     full_name: str
     initials: str = ""
     surname: str = ""
+    date_of_birth: date | None = None
     address: str = ""
     nationality: str = ""
     photo_url: str = ""
@@ -212,20 +245,6 @@ class PayrollEmployeeUpdate(BaseModel):
     provident_fund_employer_rate: float = 0.0
     other_deduction_name: str = ""
     other_deduction_amount: float = 0.0
-    default_gross_salary: float
-    tax_rate: float = 0.0
-    active: bool = True
-
-
-    position: str = ""
-    hire_date: date | None = None
-    bank_account: str = ""
-    nssa_number: str = ""
-    initials: str = ""
-    surname: str = ""
-    address: str = ""
-    nationality: str = ""
-    pension_number: str = ""
     default_gross_salary: float
     tax_rate: float = 0.0
     active: bool = True
@@ -233,11 +252,16 @@ class PayrollEmployeeUpdate(BaseModel):
 
 class PayrollEmployeeOut(BaseModel):
     id: int
+    employee_code: str
+    full_name: str
+    initials: str = ""
+    surname: str = ""
+    date_of_birth: date | None = None
+    address: str = ""
+    nationality: str = ""
     bank_name: str = ""
     bank_branch: str = ""
     bank_account_type: str = ""
-    employee_code: str
-    full_name: str
     medical_aid_number: str = ""
     medical_aid_employee_amount: float = 0.0
     medical_aid_employer_amount: float = 0.0
@@ -270,7 +294,13 @@ class PayrollEmployeeHistoryLine(BaseModel):
     status: str
     gross_pay: float
     tax_amount: float
+    nssa_amount: float = 0.0
+    pension_amount: float = 0.0
+    other_deduction: float = 0.0
+    sdl_amount: float = 0.0
+    total_deductions: float = 0.0
     net_pay: float
+    components: list[dict] = []
 
 
 class PayrollEmployeeDocumentOut(BaseModel):
@@ -296,14 +326,19 @@ class PayrollRunCreate(BaseModel):
     expense_account_id: int
     payable_account_id: int
     tax_liability_account_id: int | None = None
+    financial_year_label: str | None = None
     paye_rate: float | None = None
     nssa_rate: float = 0.0
     pension_rate: float = 0.0
     sdl_rate: float = 0.0
     other_deduction_per_employee: float = 0.0
+    provident_employee_rate: float | None = None
+    provident_employer_rate: float | None = None
     provident_mode: str = "fixed_amount"
     provident_value: float = 0.0
     provident_scope: str = "employee"
+    lock_provident_for_year: bool = False
+    apply_provident_to_year_runs: bool = False
     employee_ids: list[int] | None = None
 
 
@@ -312,6 +347,7 @@ class PayrollRunLineOut(BaseModel):
     employee_id: int
     employee_code: str
     employee_name: str
+    basic_pay: float = 0.0
     gross_pay: float
     tax_amount: float
     nssa_amount: float
@@ -339,6 +375,10 @@ class PayrollRunOut(BaseModel):
     pension_rate: float
     sdl_rate: float
     other_deduction_per_employee: float
+    financial_year_label: str = ""
+    provident_employee_rate: float = 0.0
+    provident_employer_rate: float = 0.0
+    provident_locked: bool = False
     provident_mode: str = "fixed_amount"
     provident_value: float = 0.0
     provident_scope: str = "employee"
@@ -391,6 +431,20 @@ class PayrollImportCreateRunRequest(BaseModel):
     period_label: str | None = None
     pay_date: date | None = None
     financial_year_label: str | None = None
+
+
+class PayrollPayeTableImportOut(BaseModel):
+    upload_id: int
+    source_filename: str
+    effective_date: date | None = None
+    tax_year_label: str = ""
+    row_count: int
+
+
+class PayrollPayeTableBatchImportOut(BaseModel):
+    imported_files: int
+    uploads: list[PayrollPayeTableImportOut]
+    failed_files: list[str] = []
 
 
 class InvoiceLineCreate(BaseModel):
