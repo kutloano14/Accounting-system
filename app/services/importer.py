@@ -200,7 +200,8 @@ def import_bank_csv(
     skipped = 0
     skipped_invalid = 0
     errors: list[dict] = []
-    seen_hashes: set[str] = set()
+    existing_hash_cache: dict[str, bool] = {}
+    import_occurrence_counter: dict[str, int] = {}
 
     date_keys = _prefixed_keys(DATE_KEYS, date_column)
     amount_keys = _prefixed_keys(AMOUNT_KEYS, amount_column)
@@ -249,20 +250,27 @@ def import_bank_csv(
                 debit_keys=debit_keys,
                 credit_keys=credit_keys,
             )
-            imported_hash = _make_hash(company_id, txn_date.isoformat(), description, str(amount), reference)
+            base_hash = _make_hash(company_id, txn_date.isoformat(), description, str(amount), reference)
 
-            if imported_hash in seen_hashes:
+            if base_hash not in existing_hash_cache:
+                # Query once per logical transaction hash from already-persisted history.
+                # This keeps duplicate protection across separate statement imports,
+                # while still allowing repeated identical rows inside the current file.
+                with db.no_autoflush:
+                    exists = (
+                        db.query(models.BankTransaction)
+                        .filter(models.BankTransaction.company_id == company_id, models.BankTransaction.imported_hash == base_hash)
+                        .first()
+                    )
+                existing_hash_cache[base_hash] = bool(exists)
+
+            if existing_hash_cache[base_hash]:
                 skipped += 1
                 continue
 
-            exists = (
-                db.query(models.BankTransaction)
-                .filter(models.BankTransaction.company_id == company_id, models.BankTransaction.imported_hash == imported_hash)
-                .first()
-            )
-            if exists:
-                skipped += 1
-                continue
+            occurrence = import_occurrence_counter.get(base_hash, 0) + 1
+            import_occurrence_counter[base_hash] = occurrence
+            imported_hash = base_hash if occurrence == 1 else hashlib.sha256(f"{base_hash}|{occurrence}".encode("utf-8")).hexdigest()
 
             txn = models.BankTransaction(
                 company_id=company_id,
@@ -275,7 +283,6 @@ def import_bank_csv(
                 status="imported",
             )
             db.add(txn)
-            seen_hashes.add(imported_hash)
             imported += 1
         except Exception as exc:
             skipped_invalid += 1

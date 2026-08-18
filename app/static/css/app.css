@@ -187,6 +187,19 @@ h2 {
   margin-bottom: 0.7rem;
 }
 
+.field-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  font-size: 0.82rem;
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.field-stack span {
+  padding-left: 0.1rem;
+}
+
 input,
 select {
   width: 100%;
