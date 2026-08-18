@@ -14,6 +14,7 @@ const out = {
   payroll: byId("payrollOut"),
   payrollImport: byId("payrollImportOut"),
   payrollImportRun: byId("payrollImportRunOut"),
+  payrollPayeTables: byId("payrollPayeTablesOut"),
   payrollEmployeeDetail: byId("payrollEmployeeDetailOut"),
   payrollDocVault: byId("payrollDocVaultOut"),
   taxBrackets: byId("taxBracketsOut"),
@@ -26,6 +27,45 @@ function cleanOptionalValue(value) {
   return v || null;
 }
 
+function deriveDateOfBirthFromIdNumber(idNumber) {
+  const digits = String(idNumber || "").replace(/\D/g, "");
+  if (digits.length < 6) return "";
+  const yy = Number(digits.slice(0, 2));
+  const mm = Number(digits.slice(2, 4));
+  const dd = Number(digits.slice(4, 6));
+  if (!yy || mm < 1 || mm > 12 || dd < 1 || dd > 31) return "";
+  const fullYear = yy > 30 ? 1900 + yy : 2000 + yy;
+  const dob = new Date(Date.UTC(fullYear, mm - 1, dd));
+  if (Number.isNaN(dob.getTime())) return "";
+  if (dob.getUTCFullYear() !== fullYear || dob.getUTCMonth() !== mm - 1 || dob.getUTCDate() !== dd) return "";
+  return `${fullYear.toString().padStart(4, "0")}-${String(mm).padStart(2, "0")}-${String(dd).padStart(2, "0")}`;
+}
+
+function syncDobFromId(idInputId, dobInputId) {
+  const idValue = byId(idInputId)?.value || "";
+  const derived = deriveDateOfBirthFromIdNumber(idValue);
+  const dobInput = byId(dobInputId);
+  if (!dobInput || !derived) {
+    return;
+  }
+  dobInput.value = derived;
+}
+
+function financialYearFromDateValue(value) {
+  const text = String(value || "").trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(text)) return "";
+  const year = Number(text.slice(0, 4));
+  const month = Number(text.slice(5, 7));
+  if (!year || !month) return "";
+  return month >= 3 ? `${year}/${year + 1}` : `${year - 1}/${year}`;
+}
+
+function resolvePayrollFinancialYear() {
+  const entered = byId("payrollFinancialYear")?.value?.trim() || "";
+  if (entered) return entered;
+  return financialYearFromDateValue(byId("payrollPayDate")?.value || "");
+}
+
 let activeReport = "trial";
 let cachedAccounts = [];
 let accountsTableVisible = false;
@@ -35,7 +75,13 @@ let cachedCustomers = [];
 let cachedInventoryItems = [];
 let cachedPayrollEmployees = [];
 let activeCompanyId = Number(localStorage.getItem("activeCompanyId") || 1);
-let apiBase = localStorage.getItem("apiBase") || window.location.origin;
+const preferredApiBase = "http://127.0.0.1:8001";
+const savedApiBase = localStorage.getItem("apiBase");
+let apiBase = savedApiBase && /^https?:\/\//.test(savedApiBase) ? savedApiBase : preferredApiBase;
+if (window.location.origin && window.location.origin.includes("8001")) {
+  apiBase = window.location.origin;
+}
+localStorage.setItem("apiBase", apiBase);
 let runningBalanceVisible = false;
 let activePayrollEmployeeId = null;
 let activePayrollImportId = null;
@@ -47,7 +93,15 @@ function buildApiUrl(path) {
 
 function getApiCandidates() {
   const candidates = [];
-  [window.location.origin, apiBase, "http://127.0.0.1:8000", "http://127.0.0.1:8001"].forEach((base) => {
+  [
+    window.location.origin,
+    "http://127.0.0.1:8001",
+    "http://localhost:8001",
+    "http://127.0.0.1:8000",
+    "http://localhost:8000",
+    preferredApiBase,
+    apiBase,
+  ].forEach((base) => {
     if (base && !candidates.includes(base)) {
       candidates.push(base);
     }
@@ -391,13 +445,14 @@ function renderPayrollEmployeesTable(rows) {
   }
 
   const table = renderRowsTable(
-    ["ID", "Code", "Name", "Gross Salary", "Tax %", "Active", "Profile", "Certificate"],
+    ["ID", "Code", "Name", "Gross Salary", "Provident Emp %", "Provident Employer %", "Active", "Profile", "Certificate"],
     rows.map((r) => [
       r.id,
       r.employee_code,
       r.full_name,
       Number(r.default_gross_salary || 0).toFixed(2),
-      Number(r.tax_rate || 0).toFixed(2),
+      Number(r.provident_fund_employee_rate || 0).toFixed(2),
+      Number(r.provident_fund_employer_rate || 0).toFixed(2),
       r.active ? "Yes" : "No",
       `<button class="btn btn-small" onclick="viewPayrollEmployee(${r.id})">View</button>`,
       `<button class="btn btn-small btn-ghost" onclick="downloadEmploymentCertificate(${r.id})">Employment Cert</button>`,
@@ -419,6 +474,13 @@ function renderPayrollEmployeeDetail(detail) {
     ? `<img src="${photo}" alt="${emp.full_name || "Employee"}" style="width:96px;height:96px;border-radius:50%;object-fit:cover;border:2px solid #d8e6ff;" />`
     : `<div style="width:96px;height:96px;border-radius:50%;display:flex;align-items:center;justify-content:center;background:#edf4ff;color:#1d3557;font-weight:700;border:2px solid #d8e6ff;">${String(emp.full_name || "?").charAt(0).toUpperCase()}</div>`;
 
+  const componentAmount = (components, keywords = []) => {
+    const rows = Array.isArray(components) ? components : [];
+    return rows
+      .filter((c) => keywords.some((k) => String(c?.name || "").toLowerCase().includes(k)))
+      .reduce((sum, c) => sum + Number(c?.amount || 0), 0);
+  };
+
   const rows = (detail?.payroll_history || []).map((h) => `
     <tr>
       <td>${h.payroll_run_id}</td>
@@ -427,6 +489,12 @@ function renderPayrollEmployeeDetail(detail) {
       <td>${h.status || ""}</td>
       <td>${Number(h.gross_pay || 0).toFixed(2)}</td>
       <td>${Number(h.tax_amount || 0).toFixed(2)}</td>
+      <td>${Number(componentAmount(h.components, ["uif"]) || 0).toFixed(2)}</td>
+      <td>${Number(componentAmount(h.components, ["admin levy"]) || 0).toFixed(2)}</td>
+      <td>${Number(componentAmount(h.components, ["medical"]) || 0).toFixed(2)}</td>
+      <td>${Number(componentAmount(h.components, ["sick"]) || 0).toFixed(2)}</td>
+      <td>${Number(h.pension_amount || componentAmount(h.components, ["provident"]) || 0).toFixed(2)}</td>
+      <td>${Number(h.total_deductions || 0).toFixed(2)}</td>
       <td>${Number(h.net_pay || 0).toFixed(2)}</td>
       <td>
         <div class="table-actions">
@@ -438,7 +506,7 @@ function renderPayrollEmployeeDetail(detail) {
   `).join("");
 
   const historyTable = rows
-    ? `<table class="friendly-table"><thead><tr><th>Run ID</th><th>Period</th><th>Pay Date</th><th>Status</th><th>Gross</th><th>PAYE</th><th>Net</th><th>Documents</th></tr></thead><tbody>${rows}</tbody></table>`
+    ? `<table class="friendly-table"><thead><tr><th>Run ID</th><th>Period</th><th>Pay Date</th><th>Status</th><th>Gross</th><th>PAYE</th><th>UIF</th><th>Admin Levy</th><th>Medical</th><th>Sick</th><th>Provident</th><th>Total Deductions</th><th>Net</th><th>Documents</th></tr></thead><tbody>${rows}</tbody></table>`
     : '<div class="empty-table">No payroll history found for this employee.</div>';
 
   const docs = detail?.documents || [];
@@ -488,6 +556,7 @@ function renderPayrollEmployeeDetail(detail) {
       <input id="profilePosition" value="${emp.position || ""}" placeholder="Position" />
       <input id="profileEmail" value="${emp.email || ""}" placeholder="Email" />
       <input id="profilePhone" value="${emp.phone || ""}" placeholder="Phone" />
+      <input id="profileDateOfBirth" type="date" value="${emp.date_of_birth || ""}" />
       <input id="profileHireDate" type="date" value="${emp.hire_date || ""}" />
       <input id="profileIdNumber" value="${emp.id_number || ""}" placeholder="ID Number" />
       <input id="profileTaxNumber" value="${emp.tax_number || ""}" placeholder="Tax Number" />
@@ -515,7 +584,7 @@ function renderPayrollEmployeeDetail(detail) {
       <input id="profileOtherDeductionAmount" type="number" step="0.01" min="0" value="${Number(emp.other_deduction_amount || 0)}" placeholder="Other deduction amount" />
     </div>
     <div class="actions" style="margin-top:0.55rem;">
-      <button class="btn" onclick="savePayrollEmployeeProfile()">Save Employee</button>
+      <button class="btn" onclick="savePayrollEmployeeProfile()">Save Profile Changes</button>
       <button class="btn btn-ghost" onclick="resetPayrollEmployeeDeductions()">Reset Deductions</button>
       <button class="btn btn-ghost" onclick="deletePayrollEmployeeProfile()">Delete Employee</button>
     </div>
@@ -523,6 +592,7 @@ function renderPayrollEmployeeDetail(detail) {
     <div class="profile-grid">
       <div><b>Position:</b> ${emp.position || "-"}</div>
       <div><b>Hire Date:</b> ${emp.hire_date || "-"}</div>
+      <div><b>Date of Birth:</b> ${emp.date_of_birth || "-"}</div>
       <div><b>ID Number:</b> ${emp.id_number || "-"}</div>
       <div><b>Tax Number:</b> ${emp.tax_number || "-"}</div>
       <div><b>Email:</b> ${emp.email || "-"}</div>
@@ -540,6 +610,12 @@ function renderPayrollEmployeeDetail(detail) {
     <div class="statement-caption" style="margin-top:0.75rem;">Payroll History</div>
     ${historyTable}
   `;
+
+  const profileIdInput = byId("profileIdNumber");
+  if (profileIdInput) {
+    profileIdInput.addEventListener("input", () => syncDobFromId("profileIdNumber", "profileDateOfBirth"));
+    profileIdInput.addEventListener("change", () => syncDobFromId("profileIdNumber", "profileDateOfBirth"));
+  }
 }
 
 function payrollImportEmployeeOptions(selectedEmployeeId = null) {
@@ -785,6 +861,64 @@ async function createPayrollRunFromImport() {
   if (payload?.run?.id) {
     await viewPayrollRunDetails(payload.run.id);
   }
+}
+
+function renderLatestPayrollPayeTable(payload) {
+  const container = out.payrollPayeTables;
+  if (!container) {
+    return;
+  }
+  if (!payload) {
+    container.innerHTML = '<div class="empty-table">No PAYE table data found.</div>';
+    return;
+  }
+  container.innerHTML = `
+    <div class="statement-caption">Latest SARS PAYE Table</div>
+    <div class="report-period">
+      Upload ID: ${payload.upload_id || "-"} |
+      File: ${payload.source_filename || "-"} |
+      Effective Date: ${payload.effective_date || "-"} |
+      Tax Year: ${payload.tax_year_label || "-"} |
+      Revision: ${payload.revision || "-"} |
+      Rows: ${payload.row_count || 0}
+    </div>
+  `;
+}
+
+async function importPayrollPayeTables() {
+  const files = byId("payrollPayePdfFiles")?.files;
+  if (!files || !files.length) {
+    throw new Error("Choose one or more SARS PAYE PDF files first");
+  }
+
+  const form = new FormData();
+  Array.from(files).forEach((file) => form.append("files", file));
+
+  const payload = await callApi("/payroll/paye-tables/import", {
+    method: "POST",
+    body: form,
+    timeoutMs: 120000,
+  });
+  const importedCount = Number(payload.imported_files || 0);
+  const failedFiles = Array.isArray(payload.failed_files) ? payload.failed_files : [];
+  if (failedFiles.length) {
+    const failedHtml = failedFiles.map((item) => `<li>${item}</li>`).join("");
+    out.payrollPayeTables.innerHTML = `
+      <div class="statement-caption">PAYE Import Result</div>
+      <div class="report-period">Imported: ${importedCount} file(s) | Failed: ${failedFiles.length} file(s)</div>
+      <div class="statement-caption" style="margin-top:0.55rem;">Failed Files</div>
+      <ul style="margin:0.35rem 0 0 1rem;">${failedHtml}</ul>
+    `;
+    showToast(`Imported ${importedCount}, failed ${failedFiles.length}`);
+  } else {
+    showToast(`Imported ${importedCount} PAYE table file(s)`);
+  }
+  await loadLatestPayrollPayeTable();
+}
+
+async function loadLatestPayrollPayeTable() {
+  const payload = await callApi("/payroll/paye-tables/latest");
+  renderLatestPayrollPayeTable(payload);
 }
 
 function renderPayrollDocumentVault(rows) {
@@ -1227,7 +1361,15 @@ async function fetchCompaniesWithBase(base) {
 
 async function ensureCompaniesApi() {
   const candidates = [];
-  [apiBase, window.location.origin, "http://127.0.0.1:8001"].forEach((base) => {
+  [
+    window.location.origin,
+    "http://127.0.0.1:8001",
+    "http://localhost:8001",
+    "http://127.0.0.1:8000",
+    "http://localhost:8000",
+    preferredApiBase,
+    apiBase,
+  ].forEach((base) => {
     if (base && !candidates.includes(base)) {
       candidates.push(base);
     }
@@ -1341,6 +1483,8 @@ async function refreshCompanyContext() {
   await loadInvoices().catch(() => {});
   await loadPayrollEmployees().catch(() => {});
   await loadPayrollRuns().catch(() => {});
+  await loadLatestPayrollPayeTable().catch(() => {});
+  await loadProvidentPolicy().catch(() => {});
   await loadTaxBrackets().catch(() => {});
   await loadReport().catch(() => {});
 }
@@ -1675,6 +1819,7 @@ async function loadAccounts() {
   const select = byId("ruleAccountId");
   const manageSelect = byId("accountManageSelect");
   const txnAccountSelect = byId("txnAccountId");
+  const transactionFilterAccountSelect = byId("transactionAccountFilter");
   const assetAccountSelect = byId("assetAccountId");
   const assetDepSelect = byId("assetDepExpenseAccountId");
   const loanLiabilitySelect = byId("loanLiabilityAccountId");
@@ -1687,11 +1832,15 @@ async function loadAccounts() {
   const selected = select.value;
   const manageSelected = manageSelect.value;
   const txnAccountSelected = txnAccountSelect?.value || "";
+  const transactionFilterAccountSelected = transactionFilterAccountSelect?.value || "";
   const invoiceIncomeSelected = invoiceIncomeSelect?.value || "";
 
   select.innerHTML = '<option value="">Select account</option>';
   manageSelect.innerHTML = '<option value="">Select account to delete</option>';
   if (txnAccountSelect) txnAccountSelect.innerHTML = '<option value="">Assigned account (optional)</option>';
+  if (transactionFilterAccountSelect) {
+    transactionFilterAccountSelect.innerHTML = '<option value="">All accounts</option><option value="__unassigned__">Unassigned only</option>';
+  }
   assetAccountSelect.innerHTML = '<option value="">Asset account</option>';
   assetDepSelect.innerHTML = '<option value="">Depreciation expense account</option>';
   loanLiabilitySelect.innerHTML = '<option value="">Loan liability account</option>';
@@ -1721,6 +1870,13 @@ async function loadAccounts() {
       txnOpt.value = String(account.id);
       txnOpt.textContent = label;
       txnAccountSelect.appendChild(txnOpt);
+    }
+
+    if (transactionFilterAccountSelect) {
+      const filterOpt = document.createElement("option");
+      filterOpt.value = String(account.id);
+      filterOpt.textContent = `${account.code} - ${account.name}`;
+      transactionFilterAccountSelect.appendChild(filterOpt);
     }
 
     const cat = normalizedCategory(account.category);
@@ -1795,6 +1951,9 @@ async function loadAccounts() {
   }
   if (txnAccountSelected && txnAccountSelect) {
     txnAccountSelect.value = txnAccountSelected;
+  }
+  if (transactionFilterAccountSelected && transactionFilterAccountSelect) {
+    transactionFilterAccountSelect.value = transactionFilterAccountSelected;
   }
   if (invoiceIncomeSelected && invoiceIncomeSelect) {
     invoiceIncomeSelect.value = invoiceIncomeSelected;
@@ -2027,11 +2186,17 @@ async function deleteAccount() {
 function buildTransactionFilterQuery() {
   const params = new URLSearchParams();
   const q = byId("transactionSearch")?.value?.trim() || "";
+  const accountFilter = byId("transactionAccountFilter")?.value || "";
   const fromDate = byId("transactionFromDate")?.value || "";
   const toDate = byId("transactionToDate")?.value || "";
 
   if (q) {
     params.set("q", q);
+  }
+  if (accountFilter === "__unassigned__") {
+    params.set("unassigned", "true");
+  } else if (/^\d+$/.test(accountFilter)) {
+    params.set("account_id", accountFilter);
   }
   if (fromDate) {
     params.set("from_date", fromDate);
@@ -2054,11 +2219,25 @@ async function loadTransactions() {
 
 function clearTransactionFilters() {
   if (byId("transactionSearch")) byId("transactionSearch").value = "";
+  if (byId("transactionAccountFilter")) byId("transactionAccountFilter").value = "";
   if (byId("transactionFromDate")) byId("transactionFromDate").value = "";
   if (byId("transactionToDate")) byId("transactionToDate").value = "";
 }
 
+async function ensureTransactionAccountFilterLoaded() {
+  const accountFilter = byId("transactionAccountFilter");
+  if (!accountFilter) {
+    return;
+  }
+
+  // Base options are: All accounts + Unassigned only.
+  if (accountFilter.options.length <= 2) {
+    await loadAccounts();
+  }
+}
+
 async function applyTransactionFilters() {
+  await ensureTransactionAccountFilterLoaded();
   await loadTransactions();
 }
 
@@ -2468,6 +2647,7 @@ async function addPayrollEmployee() {
   const employee_code = byId("payrollEmployeeCode")?.value?.trim();
   const full_name = byId("payrollEmployeeName")?.value?.trim();
   const photo_url = byId("payrollEmployeePhotoUrl")?.value?.trim() || "";
+  const date_of_birth = byId("payrollEmployeeDateOfBirth")?.value || null;
   const id_number = byId("payrollEmployeeIdNumber")?.value?.trim() || "";
   const tax_number = byId("payrollEmployeeTaxNumber")?.value?.trim() || "";
   const position = byId("payrollEmployeePosition")?.value?.trim() || "";
@@ -2477,10 +2657,19 @@ async function addPayrollEmployee() {
   const bank_account = byId("payrollEmployeeBankAccount")?.value?.trim() || "";
   const nssa_number = byId("payrollEmployeeNssa")?.value?.trim() || "";
   const pension_number = byId("payrollEmployeePension")?.value?.trim() || "";
+  const provident_fund_number = byId("payrollEmployeeProvidentFundNumber")?.value?.trim() || "";
+  const provident_fund_employee_rate = Number(byId("payrollEmployeeProvidentEmployeeRate")?.value || 0);
+  const provident_fund_employer_rate = Number(byId("payrollEmployeeProvidentEmployerRate")?.value || 0);
   const default_gross_salary = Number(byId("payrollEmployeeGross")?.value);
   const tax_rate = Number(byId("payrollEmployeeTaxRate")?.value || 0);
 
-  if (!employee_code || !full_name || Number.isNaN(default_gross_salary)) {
+  if (
+    !employee_code ||
+    !full_name ||
+    Number.isNaN(default_gross_salary) ||
+    Number.isNaN(provident_fund_employee_rate) ||
+    Number.isNaN(provident_fund_employer_rate)
+  ) {
     throw new Error("Provide employee code, name, and gross salary");
   }
 
@@ -2491,6 +2680,7 @@ async function addPayrollEmployee() {
       employee_code,
       full_name,
       photo_url,
+      date_of_birth,
       id_number,
       tax_number,
       position,
@@ -2500,6 +2690,9 @@ async function addPayrollEmployee() {
       bank_account,
       nssa_number,
       pension_number,
+      provident_fund_number,
+      provident_fund_employee_rate,
+      provident_fund_employer_rate,
       default_gross_salary,
       tax_rate,
       active: true,
@@ -2509,6 +2702,7 @@ async function addPayrollEmployee() {
   byId("payrollEmployeeCode").value = "";
   byId("payrollEmployeeName").value = "";
   byId("payrollEmployeePhotoUrl").value = "";
+  byId("payrollEmployeeDateOfBirth").value = "";
   byId("payrollEmployeeIdNumber").value = "";
   byId("payrollEmployeeTaxNumber").value = "";
   byId("payrollEmployeePosition").value = "";
@@ -2518,6 +2712,9 @@ async function addPayrollEmployee() {
   byId("payrollEmployeeBankAccount").value = "";
   byId("payrollEmployeeNssa").value = "";
   byId("payrollEmployeePension").value = "";
+  byId("payrollEmployeeProvidentFundNumber").value = "";
+  byId("payrollEmployeeProvidentEmployeeRate").value = "0";
+  byId("payrollEmployeeProvidentEmployerRate").value = "0";
   byId("payrollEmployeeGross").value = "";
   byId("payrollEmployeeTaxRate").value = "0";
   showToast("Payroll employee added");
@@ -2640,6 +2837,7 @@ async function savePayrollEmployeeProfile() {
     address: profileTextValue("profileAddress"),
     nationality: profileTextValue("profileNationality"),
     photo_url: profileTextValue("profilePhotoUrl"),
+    date_of_birth: byId("profileDateOfBirth")?.value || null,
     id_number: profileTextValue("profileIdNumber"),
     tax_number: profileTextValue("profileTaxNumber"),
     email: profileTextValue("profileEmail"),
@@ -2802,6 +3000,7 @@ function wirePayrollDocDropZone() {
 async function createPayrollRun() {
   const period_label = byId("payrollPeriodLabel")?.value?.trim();
   const pay_date = byId("payrollPayDate")?.value;
+  const financial_year_label = resolvePayrollFinancialYear() || null;
   const expense_account_id = Number(byId("payrollExpenseAccountId")?.value || 0);
   const payable_account_id = Number(byId("payrollPayableAccountId")?.value || 0);
   const rawTaxId = Number(byId("payrollTaxLiabilityAccountId")?.value || 0);
@@ -2810,6 +3009,9 @@ async function createPayrollRun() {
   const paye_rate = paye_rate_raw === "" || paye_rate_raw == null ? null : Number(paye_rate_raw);
   const nssa_rate = Number(byId("payrollNssaRate")?.value || 0);
   const pension_rate = Number(byId("payrollPensionRate")?.value || 0);
+  const provident_employee_rate = Number(byId("payrollProvidentEmployeeRate")?.value || 0);
+  const provident_employer_rate = Number(byId("payrollProvidentEmployerRate")?.value || 0);
+  const lock_provident_for_year = byId("payrollProvidentLockYear")?.checked !== false;
   const provident_mode = byId("payrollProvidentMode")?.value || "fixed_amount";
   const provident_value = Number(byId("payrollProvidentValue")?.value || 0);
   const provident_scope = byId("payrollProvidentScope")?.value || "employee";
@@ -2829,12 +3031,16 @@ async function createPayrollRun() {
       expense_account_id,
       payable_account_id,
       tax_liability_account_id,
+      financial_year_label,
       paye_rate,
       nssa_rate,
       pension_rate,
+      provident_employee_rate,
+      provident_employer_rate,
       provident_mode,
       provident_value,
       provident_scope,
+      lock_provident_for_year,
       sdl_rate,
       other_deduction_per_employee,
     }),
@@ -2880,11 +3086,12 @@ async function viewPayrollRunDetails(runId) {
     <div class="statement-caption">Payroll Run #${payload.id} - ${payload.period_label}</div>
     <div class="report-period">
       Pay Date: ${payload.pay_date} | Status: ${payload.status} |
+      FY: ${payload.financial_year_label || "-"} |
       Gross: ${Number(payload.total_gross || 0).toFixed(2)} |
       PAYE: ${Number(payload.total_tax || 0).toFixed(2)} |
       NSSA: ${Number(payload.total_nssa || 0).toFixed(2)} |
       Pension: ${Number(payload.total_pension || 0).toFixed(2)} |
-      Provident: ${payload.provident_mode === "percentage_of_gross" ? `${Number(payload.provident_value || 0).toFixed(2)}%` : Number(payload.provident_value || 0).toFixed(2)} (${payload.provident_scope || "employee"}) |
+      Provident (Emp%/Employer%): ${Number(payload.provident_employee_rate || 0).toFixed(2)}% / ${Number(payload.provident_employer_rate || 0).toFixed(2)}% ${payload.provident_locked ? "(Locked)" : ""} |
       SDL: ${Number(payload.total_sdl || 0).toFixed(2)} |
       Net: ${Number(payload.total_net || 0).toFixed(2)}
     </div>
@@ -3038,7 +3245,42 @@ async function loadAllStatements() {
   writeOut(out.statements, pretty(payload));
 }
 
+async function readCompanyLogoFile() {
+  const input = byId("companyLogoFile");
+  if (!input || !input.files || !input.files[0]) {
+    return byId("companyLogoDataUrl")?.value || "";
+  }
+  const file = input.files[0];
+  if (!file.type.startsWith("image/")) {
+    throw new Error("Please choose a valid image file for the company logo.");
+  }
+  return await new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ""));
+    reader.onerror = () => reject(new Error("Unable to read the selected logo image."));
+    reader.readAsDataURL(file);
+  });
+}
+
+function renderCompanyLogoPreview(dataUrl) {
+  const preview = byId("companyLogoPreview");
+  const dataUrlInput = byId("companyLogoDataUrl");
+  if (preview) {
+    if (dataUrl) {
+      preview.src = dataUrl;
+      preview.style.display = "block";
+    } else {
+      preview.removeAttribute("src");
+      preview.style.display = "none";
+    }
+  }
+  if (dataUrlInput) {
+    dataUrlInput.value = dataUrl || "";
+  }
+}
+
 async function saveCompanyProfile() {
+  const logoDataUrl = await readCompanyLogoFile();
   const payload = await callApi("/company/profile", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -3048,9 +3290,14 @@ async function saveCompanyProfile() {
       email: byId("companyEmail").value.trim(),
       phone: byId("companyPhone").value.trim(),
       tax_number: byId("companyTaxNumber").value.trim(),
+      paye_ref_no: byId("companyPayeRefNo").value.trim(),
+      sdl_ref_no: byId("companySdlRefNo").value.trim(),
+      uif_ref_no: byId("companyUifRefNo").value.trim(),
       currency: byId("companyCurrency").value.trim() || "USD",
+      logo_data_url: logoDataUrl || byId("companyLogoDataUrl")?.value || "",
     }),
   });
+  renderCompanyLogoPreview(payload.logo_data_url || "");
   writeOut(out.statements, pretty(payload));
   showToast("Company profile saved");
 }
@@ -3062,8 +3309,52 @@ async function loadCompanyProfile() {
   byId("companyEmail").value = payload.email || "";
   byId("companyPhone").value = payload.phone || "";
   byId("companyTaxNumber").value = payload.tax_number || "";
+  byId("companyPayeRefNo").value = payload.paye_ref_no || "";
+  byId("companySdlRefNo").value = payload.sdl_ref_no || "";
+  byId("companyUifRefNo").value = payload.uif_ref_no || "";
   byId("companyCurrency").value = payload.currency || "USD";
+  renderCompanyLogoPreview(payload.logo_data_url || "");
   writeOut(out.statements, pretty(payload));
+}
+
+async function loadProvidentPolicy() {
+  const financial_year_label = resolvePayrollFinancialYear();
+  if (!financial_year_label) {
+    return;
+  }
+  const payload = await callApi(`/payroll/provident-policy?financial_year_label=${encodeURIComponent(financial_year_label)}`);
+  if (byId("payrollFinancialYear")) {
+    byId("payrollFinancialYear").value = payload.financial_year_label || financial_year_label;
+  }
+  if (byId("payrollProvidentEmployeeRate")) {
+    byId("payrollProvidentEmployeeRate").value = Number(payload.employee_rate || 0).toFixed(2);
+  }
+  if (byId("payrollProvidentEmployerRate")) {
+    byId("payrollProvidentEmployerRate").value = Number(payload.employer_rate || 0).toFixed(2);
+  }
+  if (byId("payrollProvidentLockYear")) {
+    byId("payrollProvidentLockYear").checked = payload.locked !== false;
+  }
+}
+
+async function saveProvidentPolicy(apply_to_existing_runs = false) {
+  const financial_year_label = resolvePayrollFinancialYear();
+  if (!financial_year_label) {
+    throw new Error("Provide pay date or financial year first");
+  }
+  await callApi("/payroll/provident-policy", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      financial_year_label,
+      employee_rate: Number(byId("payrollProvidentEmployeeRate")?.value || 0),
+      employer_rate: Number(byId("payrollProvidentEmployerRate")?.value || 0),
+      locked: byId("payrollProvidentLockYear")?.checked !== false,
+      apply_to_existing_runs,
+    }),
+  });
+  showToast(apply_to_existing_runs ? "Provident % applied to all year runs" : "Provident % saved for year");
+  await loadPayrollRuns().catch(() => {});
 }
 
 function downloadStatement() {
@@ -3189,10 +3480,14 @@ bind("previewPayrollImportBtn", previewPayrollImport, out.payrollImport);
 bind("autoCreatePayrollImportBtn", autoCreatePayrollImportUnmatched, out.payrollImport);
 bind("createPayrollRunFromImportBtn", createPayrollRunFromImport, out.payrollImport);
 bind("loadLastPayrollImportBtn", loadLatestPayrollImport, out.payrollImport);
+bind("importPayrollPayeTablesBtn", importPayrollPayeTables, out.payrollPayeTables);
+bind("loadLatestPayrollPayeTableBtn", loadLatestPayrollPayeTable, out.payrollPayeTables);
 bind("uploadPayrollDocBtn", uploadPayrollEmployeeDocument, out.payrollDocVault);
 bind("loadPayrollDocVaultBtn", loadPayrollDocVault, out.payrollDocVault);
 bind("createPayrollRunBtn", createPayrollRun, out.payroll);
 bind("loadPayrollRunsBtn", loadPayrollRuns, out.payroll);
+bind("saveProvidentPolicyBtn", () => saveProvidentPolicy(false), out.payroll);
+bind("applyProvidentPolicyBtn", () => saveProvidentPolicy(true), out.payroll);
 bind("addTaxBracketBtn", addTaxBracketLocal, out.taxBrackets);
 bind("saveTaxBracketsBtn", saveTaxBrackets, out.taxBrackets);
 bind("loadTaxBracketsBtn", loadTaxBrackets, out.taxBrackets);
@@ -3201,11 +3496,24 @@ bind("loadAllStatementsBtn", loadAllStatements, out.statements);
 bind("downloadStatementBtn", downloadStatement, out.statements);
 bind("saveCompanyProfileBtn", saveCompanyProfile, out.statements);
 bind("loadCompanyProfileBtn", loadCompanyProfile, out.statements);
+const companyLogoFileInput = byId("companyLogoFile");
+if (companyLogoFileInput) {
+  companyLogoFileInput.addEventListener("change", async () => {
+    try {
+      const logoDataUrl = await readCompanyLogoFile();
+      renderCompanyLogoPreview(logoDataUrl);
+    } catch (err) {
+      showToast(err.message || "Logo selection failed");
+    }
+  });
+}
 wireTabs();
 wirePayrollDocDropZone();
-loadCompanies().catch((err) => {
-  writeOut(out.process, `Error: ${err.message || err}`);
-});
+loadCompanies()
+  .then(() => refreshCompanyContext())
+  .catch((err) => {
+    writeOut(out.process, `Error: ${err.message || err}`);
+  });
 renderInvoiceDraftLines();
 const invoiceCustomerSelect = byId("invoiceCustomerId");
 if (invoiceCustomerSelect) {
@@ -3226,8 +3534,38 @@ if (activeCompanyEl) {
     await refreshCompanyContext();
   });
 }
+const transactionAccountFilterEl = byId("transactionAccountFilter");
+if (transactionAccountFilterEl) {
+  const warmAccountFilter = () => {
+    ensureTransactionAccountFilterLoaded().catch(() => {});
+  };
+  transactionAccountFilterEl.addEventListener("focus", warmAccountFilter);
+  transactionAccountFilterEl.addEventListener("click", warmAccountFilter);
+  transactionAccountFilterEl.addEventListener("change", () => {
+    applyTransactionFilters().catch((err) => {
+      writeOut(out.transactions, `Error: ${err.message || err}`);
+      showToast(err.message || "Could not filter transactions");
+    });
+  });
+}
 loadAccounts().catch(() => {});
 loadTaxBrackets().catch(() => {});
+const payrollPayDateEl = byId("payrollPayDate");
+if (payrollPayDateEl) {
+  payrollPayDateEl.addEventListener("change", () => {
+    const fy = financialYearFromDateValue(payrollPayDateEl.value);
+    const fyInput = byId("payrollFinancialYear");
+    if (fy && fyInput && !String(fyInput.value || "").trim()) {
+      fyInput.value = fy;
+    }
+    loadProvidentPolicy().catch(() => {});
+  });
+}
+const addEmployeeIdEl = byId("payrollEmployeeIdNumber");
+if (addEmployeeIdEl) {
+  addEmployeeIdEl.addEventListener("input", () => syncDobFromId("payrollEmployeeIdNumber", "payrollEmployeeDateOfBirth"));
+  addEmployeeIdEl.addEventListener("change", () => syncDobFromId("payrollEmployeeIdNumber", "payrollEmployeeDateOfBirth"));
+}
 setAccountsTableVisibility(false);
 loadCompanyProfile().catch(() => {});
 window.manualAllocate = (...args) => {

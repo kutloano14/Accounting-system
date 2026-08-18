@@ -7,7 +7,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,700&family=Space+Grotesk:wght@400;500;700&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/static/css/app.css?v=15" />
+  <link rel="stylesheet" href="/static/css/app.css?v=16" />
 </head>
 <body>
   <div class="bg-shape one"></div>
@@ -154,6 +154,10 @@
       </div>
       <div class="form-grid" style="margin-bottom: 0.6rem;">
         <input id="transactionSearch" placeholder="Search description/reference" />
+        <select id="transactionAccountFilter">
+          <option value="">All accounts</option>
+          <option value="__unassigned__">Unassigned only</option>
+        </select>
         <input id="transactionFromDate" type="date" placeholder="From date" />
         <input id="transactionToDate" type="date" placeholder="To date" />
         <button id="filterTransactionsBtn" class="btn btn-ghost">Apply Filter</button>
@@ -321,13 +325,26 @@
         <input id="payrollEmployeePosition" placeholder="Position" />
         <input id="payrollEmployeeEmail" placeholder="Email" />
         <input id="payrollEmployeePhone" placeholder="Phone" />
-        <input id="payrollEmployeeHireDate" type="date" />
         <input id="payrollEmployeeBankAccount" placeholder="Bank account" />
         <input id="payrollEmployeeNssa" placeholder="NSSA number" />
         <input id="payrollEmployeePension" placeholder="Pension number" />
+        <label class="field-stack">
+          <span>Date of birth</span>
+          <input id="payrollEmployeeDateOfBirth" type="date" />
+        </label>
+        <label class="field-stack">
+          <span>Hire date</span>
+          <input id="payrollEmployeeHireDate" type="date" />
+        </label>
+        <input id="payrollEmployeeProvidentFundNumber" placeholder="Provident fund number" />
+        <input id="payrollEmployeeProvidentEmployeeRate" type="number" step="0.01" min="0" max="100" value="0" placeholder="Provident employee %" />
+        <input id="payrollEmployeeProvidentEmployerRate" type="number" step="0.01" min="0" max="100" value="0" placeholder="Provident employer %" />
         <input id="payrollEmployeeGross" type="number" step="0.01" placeholder="Gross salary" />
         <input id="payrollEmployeeTaxRate" type="number" step="0.01" min="0" max="100" value="0" placeholder="Tax rate %" />
+      </div>
+      <div class="actions" style="margin-bottom: 0.6rem;">
         <button id="addPayrollEmployeeBtn" class="btn">Add Employee</button>
+        <button id="resetPayrollEmployeeFormBtn" class="btn btn-ghost">Clear / Cancel Edit</button>
         <button id="loadPayrollEmployeesBtn" class="btn btn-ghost">Load Employees</button>
       </div>
 
@@ -351,6 +368,14 @@
       </div>
       <div id="payrollImportOut" class="table-wrap"></div>
       <div id="payrollImportRunOut" class="table-wrap"></div>
+
+      <div class="statement-caption" style="margin-top:0.85rem;">SARS PAYE Table PDFs</div>
+      <div class="form-grid" style="margin-bottom: 0.6rem;">
+        <input id="payrollPayePdfFiles" type="file" accept=".pdf" multiple />
+        <button id="importPayrollPayeTablesBtn" class="btn btn-ghost">Import PAYE PDFs</button>
+        <button id="loadLatestPayrollPayeTableBtn" class="btn btn-ghost">Load Latest PAYE Table</button>
+      </div>
+      <div id="payrollPayeTablesOut" class="table-wrap"></div>
 
       <div class="form-grid" style="margin-bottom: 0.6rem;">
         <input id="payrollDocEmployeeId" type="number" placeholder="Employee ID for docs" />
@@ -383,6 +408,7 @@
       <div class="form-grid" style="margin-bottom: 0.6rem;">
         <input id="payrollPeriodLabel" placeholder="Period label (e.g. Oct 2025)" />
         <input id="payrollPayDate" type="date" />
+        <input id="payrollFinancialYear" placeholder="Financial year (e.g. 2025/2026)" />
         <select id="payrollExpenseAccountId">
           <option value="">Payroll expense account</option>
         </select>
@@ -398,6 +424,8 @@
         <input id="payrollPayeRate" type="number" step="0.01" min="0" max="100" placeholder="PAYE rate % (optional override)" />
         <input id="payrollNssaRate" type="number" step="0.01" min="0" max="100" value="0" placeholder="NSSA rate %" />
         <input id="payrollPensionRate" type="number" step="0.01" min="0" max="100" value="0" placeholder="Pension rate %" />
+        <input id="payrollProvidentEmployeeRate" type="number" step="0.01" min="0" max="100" value="0" placeholder="Provident employee % (of basic)" />
+        <input id="payrollProvidentEmployerRate" type="number" step="0.01" min="0" max="100" value="0" placeholder="Provident employer % (of basic)" />
         <select id="payrollProvidentMode">
           <option value="fixed_amount">Provident: Fixed Amount</option>
           <option value="percentage_of_gross">Provident: Percentage of Gross</option>
@@ -413,6 +441,15 @@
         <select id="payrollBankAccountId">
           <option value="">Payroll payment bank account</option>
         </select>
+      </div>
+
+      <div class="actions" style="margin-bottom: 0.6rem;">
+        <label style="display:flex;align-items:center;gap:0.35rem;">
+          <input id="payrollProvidentLockYear" type="checkbox" checked />
+          Lock provident % for this financial year
+        </label>
+        <button id="saveProvidentPolicyBtn" class="btn btn-ghost">Save Provident % for Year</button>
+        <button id="applyProvidentPolicyBtn" class="btn btn-ghost">Apply Provident % To All Year Runs</button>
       </div>
 
       <div class="actions">
@@ -458,7 +495,17 @@
         <input id="companyEmail" placeholder="Company Email" />
         <input id="companyPhone" placeholder="Company Phone" />
         <input id="companyTaxNumber" placeholder="Tax Number" />
+        <input id="companyPayeRefNo" placeholder="PAYE Ref Number" />
+        <input id="companySdlRefNo" placeholder="SDL Ref Number" />
+        <input id="companyUifRefNo" placeholder="UIF Ref Number" />
         <input id="companyCurrency" placeholder="Currency (e.g. USD)" value="USD" />
+        <div class="file-picker" style="display:flex; flex-direction:column; gap:0.4rem;">
+          <label for="companyLogoFile" style="font-weight:600;">Company Logo</label>
+          <input id="companyLogoFile" type="file" accept="image/*" />
+          <small style="color:#51708a;">Recommended size: 240x120 px and PNG/JPG only.</small>
+          <input id="companyLogoDataUrl" type="hidden" />
+          <img id="companyLogoPreview" alt="Company logo preview" style="max-width: 180px; max-height: 90px; display:none; border:1px solid #dbe7f4; border-radius: 8px; background:#fff;" />
+        </div>
       </div>
       <div class="actions" style="margin-bottom: 0.6rem;">
         <button id="saveCompanyProfileBtn" class="btn">Save Company Profile</button>
@@ -493,6 +540,6 @@
 
   <div id="toast" class="toast"></div>
 
-  <script src="/static/js/app.js?v=34"></script>
+  <script src="/static/js/app.js?v=20260818-AccountFilterFix-1"></script>
 </body>
 </html>

@@ -18,6 +18,7 @@ from sqlalchemy import func
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
+from pypdf import PdfReader
 
 from app import models, schemas
 from app.database import Base, engine, get_db
@@ -121,9 +122,13 @@ def on_startup():
             "pension_rate": "ALTER TABLE payroll_runs ADD COLUMN pension_rate FLOAT DEFAULT 0.0",
             "sdl_rate": "ALTER TABLE payroll_runs ADD COLUMN sdl_rate FLOAT DEFAULT 0.0",
             "other_deduction_per_employee": "ALTER TABLE payroll_runs ADD COLUMN other_deduction_per_employee FLOAT DEFAULT 0.0",
+            "financial_year_label": "ALTER TABLE payroll_runs ADD COLUMN financial_year_label VARCHAR(40) DEFAULT ''",
             "provident_mode": "ALTER TABLE payroll_runs ADD COLUMN provident_mode VARCHAR(30) DEFAULT 'fixed_amount'",
             "provident_value": "ALTER TABLE payroll_runs ADD COLUMN provident_value FLOAT DEFAULT 0.0",
             "provident_scope": "ALTER TABLE payroll_runs ADD COLUMN provident_scope VARCHAR(20) DEFAULT 'employee'",
+            "provident_employee_rate": "ALTER TABLE payroll_runs ADD COLUMN provident_employee_rate FLOAT DEFAULT 0.0",
+            "provident_employer_rate": "ALTER TABLE payroll_runs ADD COLUMN provident_employer_rate FLOAT DEFAULT 0.0",
+            "provident_locked": "ALTER TABLE payroll_runs ADD COLUMN provident_locked INTEGER DEFAULT 0",
             "payment_entry_id": "ALTER TABLE payroll_runs ADD COLUMN payment_entry_id INTEGER",
             "paid_date": "ALTER TABLE payroll_runs ADD COLUMN paid_date DATE",
         }
@@ -133,20 +138,37 @@ def on_startup():
 
         payroll_line_cols = [row[1] for row in conn.execute(text("PRAGMA table_info(payroll_run_lines)"))]
         payroll_line_alters = {
+            "basic_pay": "ALTER TABLE payroll_run_lines ADD COLUMN basic_pay FLOAT DEFAULT 0.0",
             "nssa_amount": "ALTER TABLE payroll_run_lines ADD COLUMN nssa_amount FLOAT DEFAULT 0.0",
             "pension_amount": "ALTER TABLE payroll_run_lines ADD COLUMN pension_amount FLOAT DEFAULT 0.0",
             "other_deduction": "ALTER TABLE payroll_run_lines ADD COLUMN other_deduction FLOAT DEFAULT 0.0",
             "sdl_amount": "ALTER TABLE payroll_run_lines ADD COLUMN sdl_amount FLOAT DEFAULT 0.0",
             "total_deductions": "ALTER TABLE payroll_run_lines ADD COLUMN total_deductions FLOAT DEFAULT 0.0",
+            "provident_employee_rate": "ALTER TABLE payroll_run_lines ADD COLUMN provident_employee_rate FLOAT DEFAULT 0.0",
+            "provident_employer_rate": "ALTER TABLE payroll_run_lines ADD COLUMN provident_employer_rate FLOAT DEFAULT 0.0",
         }
         for col, ddl in payroll_line_alters.items():
             if col not in payroll_line_cols:
+                conn.execute(text(ddl))
+        conn.execute(text("UPDATE payroll_run_lines SET basic_pay = gross_pay WHERE COALESCE(basic_pay, 0) = 0"))
+
+        company_profile_cols = [row[1] for row in conn.execute(text("PRAGMA table_info(company_profile)"))]
+        company_profile_alters = {
+            "paye_ref_no": "ALTER TABLE company_profile ADD COLUMN paye_ref_no VARCHAR(80) DEFAULT ''",
+            "sdl_ref_no": "ALTER TABLE company_profile ADD COLUMN sdl_ref_no VARCHAR(80) DEFAULT ''",
+            "uif_ref_no": "ALTER TABLE company_profile ADD COLUMN uif_ref_no VARCHAR(80) DEFAULT ''",
+            "currency": "ALTER TABLE company_profile ADD COLUMN currency VARCHAR(10) DEFAULT 'USD'",
+            "logo_data_url": "ALTER TABLE company_profile ADD COLUMN logo_data_url TEXT DEFAULT ''",
+        }
+        for col, ddl in company_profile_alters.items():
+            if col not in company_profile_cols:
                 conn.execute(text(ddl))
 
         payroll_employee_cols = [row[1] for row in conn.execute(text("PRAGMA table_info(payroll_employees)"))]
         payroll_employee_alters = {
             "initials": "ALTER TABLE payroll_employees ADD COLUMN initials VARCHAR(40) DEFAULT ''",
             "surname": "ALTER TABLE payroll_employees ADD COLUMN surname VARCHAR(120) DEFAULT ''",
+            "date_of_birth": "ALTER TABLE payroll_employees ADD COLUMN date_of_birth DATE",
             "address": "ALTER TABLE payroll_employees ADD COLUMN address VARCHAR(255) DEFAULT ''",
             "nationality": "ALTER TABLE payroll_employees ADD COLUMN nationality VARCHAR(80) DEFAULT ''",
             "photo_url": "ALTER TABLE payroll_employees ADD COLUMN photo_url VARCHAR(500) DEFAULT ''",
@@ -235,7 +257,11 @@ def _company_profile_data(profile: models.CompanyProfile) -> dict:
         "email": profile.email,
         "phone": profile.phone,
         "tax_number": profile.tax_number,
+        "paye_ref_no": profile.paye_ref_no,
+        "sdl_ref_no": profile.sdl_ref_no,
+        "uif_ref_no": profile.uif_ref_no,
         "currency": profile.currency,
+        "logo_data_url": profile.logo_data_url or "",
     }
 
 
@@ -290,6 +316,232 @@ def _normalize_person_name(value: str) -> str:
     return " ".join(text_value.split())
 
 
+def _financial_year_from_date(pay_date_value: date | None) -> str:
+    if not pay_date_value:
+        return ""
+    year = pay_date_value.year
+    if pay_date_value.month >= 3:
+        return f"{year}/{year + 1}"
+    return f"{year - 1}/{year}"
+
+
+def _parse_financial_year_bounds(financial_year_label: str) -> tuple[date, date] | None:
+    clean = str(financial_year_label or "").strip()
+    match = re.match(r"^(\d{4})\s*/\s*(\d{4})$", clean)
+    if not match:
+        return None
+    start_year = int(match.group(1))
+    end_year = int(match.group(2))
+    if end_year != start_year + 1:
+        return None
+    start_date = date(start_year, 3, 1)
+    end_date = date(end_year, 3, 1) - timedelta(days=1)
+    return start_date, end_date
+
+
+def _get_provident_policy(db: Session, company_id: int, financial_year_label: str) -> models.PayrollProvidentPolicy | None:
+    clean = str(financial_year_label or "").strip()
+    if not clean:
+        return None
+    return (
+        db.query(models.PayrollProvidentPolicy)
+        .filter(
+            models.PayrollProvidentPolicy.company_id == company_id,
+            models.PayrollProvidentPolicy.financial_year_label == clean,
+        )
+        .first()
+    )
+
+
+def _extract_provident_components(components: list[dict]) -> tuple[list[dict], float]:
+    kept: list[dict] = []
+    employer_provident_total = 0.0
+    for item in components:
+        name = str(item.get("name") or "").lower()
+        scope = str(item.get("scope") or "").lower()
+        if "provident" in name:
+            if scope == "employer":
+                employer_provident_total += float(item.get("amount") or 0.0)
+            continue
+        kept.append(item)
+    return kept, round(employer_provident_total, 2)
+
+
+def _apply_provident_rates_to_employee(employee: models.PayrollEmployee, policy: models.PayrollProvidentPolicy | None) -> None:
+    if not policy:
+        return
+
+    employee_rate = float(policy.employee_rate or 0.0)
+    employer_rate = float(policy.employer_rate or 0.0)
+
+    if not employee.provident_fund_employee_rate:
+        employee.provident_fund_employee_rate = employee_rate
+    if not employee.provident_fund_employer_rate:
+        employee.provident_fund_employer_rate = employer_rate
+
+
+def _build_import_run_line_values(
+    line,
+    *,
+    basic_pay: float,
+    gross_pay: float,
+    tax_amount: float,
+    use_policy: bool,
+    policy_employee_rate: float,
+    policy_employer_rate: float,
+) -> dict:
+    basic_pay_value = round(float(basic_pay or 0.0), 2)
+    gross_pay_value = round(float(gross_pay or basic_pay_value or 0.0), 2)
+    tax_amount_value = round(float(tax_amount or 0.0), 2)
+    employee_rate = float(policy_employee_rate or 0.0)
+    employer_rate = float(policy_employer_rate or 0.0)
+
+    if use_policy:
+        pension_amount = round(basic_pay_value * employee_rate / 100.0, 2)
+        company_provident_amount = round(basic_pay_value * employer_rate / 100.0, 2)
+        total_deductions = round(float(getattr(line, "total_deductions", 0) or 0.0), 2)
+        net_pay = round(float(getattr(line, "net_pay", 0) or 0.0), 2)
+        if total_deductions <= 0:
+            total_deductions = round(tax_amount_value + pension_amount, 2)
+        if net_pay <= 0:
+            net_pay = round(max(gross_pay_value - total_deductions, 0.0), 2)
+    else:
+        pension_amount = round(float(getattr(line, "provident_fund", 0) or 0.0), 2)
+        company_provident_amount = round(float(getattr(line, "company_provident_fund", 0) or 0.0), 2)
+        total_deductions = round(float(getattr(line, "total_deductions", 0) or 0.0), 2)
+        net_pay = round(float(getattr(line, "net_pay", 0) or 0.0), 2)
+        if total_deductions <= 0:
+            total_deductions = round(tax_amount_value + pension_amount, 2)
+        if net_pay <= 0:
+            net_pay = round(max(gross_pay_value - total_deductions, 0.0), 2)
+
+    return {
+        "gross_pay": gross_pay_value,
+        "pension_amount": pension_amount,
+        "company_provident_amount": company_provident_amount,
+        "total_deductions": total_deductions,
+        "net_pay": net_pay,
+    }
+
+
+def _recompute_payroll_run_totals(run: models.PayrollRun):
+    lines = run.lines or []
+    run.total_gross = round(sum(float(ln.gross_pay or 0.0) for ln in lines), 2)
+    run.total_tax = round(sum(float(ln.tax_amount or 0.0) for ln in lines), 2)
+    run.total_nssa = round(sum(float(ln.nssa_amount or 0.0) for ln in lines), 2)
+    run.total_pension = round(sum(float(ln.pension_amount or 0.0) for ln in lines), 2)
+    run.total_other_deductions = round(sum(float(ln.other_deduction or 0.0) for ln in lines), 2)
+    run.total_sdl = round(sum(float(ln.sdl_amount or 0.0) for ln in lines), 2)
+    run.total_net = round(sum(float(ln.net_pay or 0.0) for ln in lines), 2)
+
+
+def _apply_provident_policy_to_run(
+    run: models.PayrollRun,
+    employee_rate: float,
+    employer_rate: float,
+    keep_net_unchanged: bool,
+):
+    lines = run.lines or []
+    for ln in lines:
+        basic_pay = float(ln.basic_pay or 0.0)
+        if basic_pay <= 0:
+            basic_pay = float(ln.gross_pay or 0.0)
+            ln.basic_pay = basic_pay
+
+        previous_pension = round(float(ln.pension_amount or 0.0), 2)
+        new_pension = round(basic_pay * employee_rate / 100.0, 2)
+        delta_pension = round(new_pension - previous_pension, 2)
+
+        old_components = json.loads(ln.deductions_json or "[]") if (ln.deductions_json or "").strip() else []
+        preserved_components, old_employer_provident = _extract_provident_components(old_components)
+        new_employer_provident = round(basic_pay * employer_rate / 100.0, 2)
+
+        if new_pension > 0:
+            preserved_components.append(
+                {
+                    "name": "Provident Fund",
+                    "scope": "employee",
+                    "calculation_type": "percentage_of_basic",
+                    "value": employee_rate,
+                    "amount": new_pension,
+                }
+            )
+        if new_employer_provident > 0:
+            preserved_components.append(
+                {
+                    "name": "Company Provident Fund",
+                    "scope": "employer",
+                    "calculation_type": "percentage_of_basic",
+                    "value": employer_rate,
+                    "amount": new_employer_provident,
+                }
+            )
+
+        prev_total_deductions = round(float(ln.total_deductions or 0.0), 2)
+        new_total_deductions = round(prev_total_deductions + delta_pension, 2)
+        previous_net = round(float(ln.net_pay or 0.0), 2)
+        new_gross = round(float(ln.gross_pay or 0.0), 2)
+        if keep_net_unchanged:
+            new_gross = round(new_gross + delta_pension, 2)
+            new_net = previous_net
+        else:
+            new_net = round(new_gross - new_total_deductions, 2)
+
+        ln.gross_pay = new_gross
+        ln.pension_amount = new_pension
+        ln.total_deductions = new_total_deductions
+        ln.employee_deductions_total = new_total_deductions
+        ln.net_pay = new_net
+        ln.provident_employee_rate = employee_rate
+        ln.provident_employer_rate = employer_rate
+        ln.employer_contributions_total = round(
+            float(ln.employer_contributions_total or 0.0) - old_employer_provident + new_employer_provident,
+            2,
+        )
+        ln.deductions_json = json.dumps(preserved_components)
+
+    run.provident_mode = "percentage_of_basic"
+    run.provident_scope = "both"
+    run.provident_value = employee_rate
+    run.provident_employee_rate = employee_rate
+    run.provident_employer_rate = employer_rate
+    _recompute_payroll_run_totals(run)
+
+
+def _month_period_from_date(pay_date_value: date | None) -> str:
+    if not pay_date_value:
+        return ""
+    return pay_date_value.strftime("%b %Y")
+
+
+def _extract_period_from_title(title: str) -> str:
+    if not title:
+        return ""
+    upper = str(title).upper()
+    month_tokens = {
+        "JAN": "Jan",
+        "FEB": "Feb",
+        "MAR": "Mar",
+        "APR": "Apr",
+        "MAY": "May",
+        "JUN": "Jun",
+        "JUL": "Jul",
+        "AUG": "Aug",
+        "SEP": "Sep",
+        "OCT": "Oct",
+        "NOV": "Nov",
+        "DEC": "Dec",
+    }
+    for token, out_month in month_tokens.items():
+        found = re.search(rf"\b{token}[A-Z]*\b", upper)
+        if found:
+            year_match = re.search(r"\b(20\d{2})\b", upper)
+            if year_match:
+                return f"{out_month} {year_match.group(1)}"
+            return out_month
+    return ""
+
+
 def _parse_money(value: str | None) -> float:
     raw = str(value or "").strip()
     if not raw:
@@ -305,6 +557,154 @@ def _parse_money(value: str | None) -> float:
     except ValueError:
         return 0.0
     return round(-amount if negative else amount, 2)
+
+
+def _parse_sars_number(value: str | None) -> float:
+    cleaned = re.sub(r"[^0-9.\-]", "", str(value or "").replace(" ", ""))
+    if not cleaned:
+        return 0.0
+    try:
+        return float(cleaned)
+    except ValueError:
+        return 0.0
+
+
+def _extract_date_of_birth_from_id_number(id_number: str | None) -> date | None:
+    digits = "".join(ch for ch in str(id_number or "") if ch.isdigit())
+    if len(digits) < 6:
+        return None
+    try:
+        yy = int(digits[0:2])
+        mm = int(digits[2:4])
+        dd = int(digits[4:6])
+        century = 1900 if yy > 30 else 2000
+        return date(century + yy, mm, dd)
+    except ValueError:
+        return None
+
+
+def _age_on_date(dob: date | None, as_of: date) -> int | None:
+    if not dob:
+        return None
+    years = as_of.year - dob.year
+    before_birthday = (as_of.month, as_of.day) < (dob.month, dob.day)
+    return years - (1 if before_birthday else 0)
+
+
+def _parse_paye_pdf_content(pdf_bytes: bytes) -> tuple[date | None, str, str, list[dict]]:
+    reader = PdfReader(io.BytesIO(pdf_bytes))
+    text_chunks = []
+    for page in reader.pages:
+        text_chunks.append(page.extract_text() or "")
+    text_content = "\n".join(text_chunks)
+
+    effective_date = None
+    date_match = re.search(r"(\d{4})[./-](\d{2})[./-](\d{2})", text_content)
+    if date_match:
+        try:
+            effective_date = date(int(date_match.group(1)), int(date_match.group(2)), int(date_match.group(3)))
+        except ValueError:
+            effective_date = None
+
+    tax_year_label = ""
+    tax_year_match = re.search(r"\((\d{4})\s+TAX\s+YEAR\)", text_content, re.IGNORECASE)
+    if tax_year_match:
+        tax_year = int(tax_year_match.group(1))
+        tax_year_label = f"{tax_year - 1}/{tax_year}"
+
+    revision = ""
+    revision_match = re.search(r"Revision\s*:\s*([^\n]+)", text_content, re.IGNORECASE)
+    if revision_match:
+        revision = revision_match.group(1).strip().split(" ")[0]
+
+    rows: list[dict] = []
+    row_pattern = re.compile(
+        r"R\s*([0-9 ]+)\s*-\s*R\s*([0-9 ]+)\s*R\s*([0-9 ]+)\s*R\s*([0-9 ]+)\s*R\s*([0-9 ]+)\s*R\s*([0-9 ]+)",
+        re.IGNORECASE,
+    )
+    seen = set()
+    for match in row_pattern.finditer(text_content):
+        rem_from = _parse_sars_number(match.group(1))
+        rem_to = _parse_sars_number(match.group(2))
+        annual_equivalent = _parse_sars_number(match.group(3))
+        tax_under_65 = _parse_sars_number(match.group(4))
+        tax_65_to_74 = _parse_sars_number(match.group(5))
+        tax_over_75 = _parse_sars_number(match.group(6))
+        key = (rem_from, rem_to, annual_equivalent, tax_under_65, tax_65_to_74, tax_over_75)
+        if key in seen:
+            continue
+        seen.add(key)
+        rows.append(
+            {
+                "remuneration_from": rem_from,
+                "remuneration_to": rem_to,
+                "annual_equivalent": annual_equivalent,
+                "tax_under_65": tax_under_65,
+                "tax_65_to_74": tax_65_to_74,
+                "tax_over_75": tax_over_75,
+            }
+        )
+
+    rows.sort(key=lambda r: (r["remuneration_from"], r["remuneration_to"]))
+    return effective_date, tax_year_label, revision, rows
+
+
+def _select_active_paye_upload(db: Session, company_id: int, pay_date_value: date) -> models.PayrollPayeTableUpload | None:
+    effective = (
+        db.query(models.PayrollPayeTableUpload)
+        .filter(
+            models.PayrollPayeTableUpload.company_id == company_id,
+            models.PayrollPayeTableUpload.effective_date.is_not(None),
+            models.PayrollPayeTableUpload.effective_date <= pay_date_value,
+        )
+        .order_by(models.PayrollPayeTableUpload.effective_date.desc(), models.PayrollPayeTableUpload.uploaded_at.desc())
+        .first()
+    )
+    if effective:
+        return effective
+    return (
+        db.query(models.PayrollPayeTableUpload)
+        .filter(models.PayrollPayeTableUpload.company_id == company_id)
+        .order_by(models.PayrollPayeTableUpload.uploaded_at.desc())
+        .first()
+    )
+
+
+def _lookup_paye_from_table(
+    db: Session,
+    company_id: int,
+    pay_date_value: date,
+    monthly_remuneration: float,
+    employee_dob: date | None,
+) -> float | None:
+    upload = _select_active_paye_upload(db, company_id, pay_date_value)
+    if not upload:
+        return None
+
+    rows = (
+        db.query(models.PayrollPayeTableRow)
+        .filter(models.PayrollPayeTableRow.upload_id == upload.id)
+        .order_by(models.PayrollPayeTableRow.remuneration_from.asc(), models.PayrollPayeTableRow.remuneration_to.asc())
+        .all()
+    )
+    if not rows:
+        return None
+
+    remuneration = round(max(float(monthly_remuneration or 0.0), 0.0), 2)
+    selected = None
+    for row in rows:
+        if remuneration >= float(row.remuneration_from or 0.0) and remuneration <= float(row.remuneration_to or 0.0):
+            selected = row
+            break
+    if selected is None:
+        selected = rows[-1] if remuneration > float(rows[-1].remuneration_to or 0.0) else rows[0]
+
+    age = _age_on_date(employee_dob, pay_date_value)
+    if age is None or age < 65:
+        return round(float(selected.tax_under_65 or 0.0), 2)
+    if age <= 74:
+        return round(float(selected.tax_65_to_74 or 0.0), 2)
+    return round(float(selected.tax_over_75 or 0.0), 2)
 
 
 def _find_import_employee_match(
@@ -529,6 +929,7 @@ def _payroll_employee_payload(emp: models.PayrollEmployee) -> dict:
         "full_name": emp.full_name,
         "initials": emp.initials,
         "surname": emp.surname,
+        "date_of_birth": emp.date_of_birth,
         "address": emp.address,
         "nationality": emp.nationality,
         "photo_url": emp.photo_url,
@@ -641,12 +1042,20 @@ def _recalculate_invoice_status(db: Session, inv: models.Invoice):
         inv.status = "paid"
         if not inv.paid_date:
             inv.paid_date = date.today()
-    else:
-        inv.paid_date = None
-        if inv.sent_date:
+        return
+
+    inv.paid_date = None
+    if inv.due_date < date.today():
+        inv.status = "overdue"
+    elif inv.sent_date:
+        if inv.total > 0 and outstanding < inv.total:
+            inv.status = "partial"
+        else:
             inv.status = "sent"
-        if inv.due_date < date.today():
-            inv.status = "overdue"
+    elif inv.total > 0 and outstanding < inv.total:
+        inv.status = "partial"
+    else:
+        inv.status = "draft"
 
 
 def _refresh_overdue_invoices(db: Session, company_id: int):
@@ -665,7 +1074,9 @@ def _refresh_overdue_invoices(db: Session, company_id: int):
         if inv.due_date < date.today():
             inv.status = "overdue"
         elif inv.sent_date:
-            inv.status = "sent"
+            inv.status = "partial" if inv.total > 0 and inv.outstanding_balance < inv.total else "sent"
+        elif inv.total > 0 and inv.outstanding_balance < inv.total:
+            inv.status = "partial"
         else:
             inv.status = "draft"
         if old != inv.status:
@@ -1302,7 +1713,11 @@ def get_company_profile(company_id: int = 1, db: Session = Depends(get_db)):
         "email": p.email,
         "phone": p.phone,
         "tax_number": p.tax_number,
+        "paye_ref_no": p.paye_ref_no,
+        "sdl_ref_no": p.sdl_ref_no,
+        "uif_ref_no": p.uif_ref_no,
         "currency": p.currency,
+        "logo_data_url": p.logo_data_url or "",
     }
 
 
@@ -1316,7 +1731,13 @@ def update_company_profile(payload: schemas.CompanyProfileUpdate, company_id: in
     p.email = payload.email.strip()
     p.phone = payload.phone.strip()
     p.tax_number = payload.tax_number.strip()
+    p.paye_ref_no = payload.paye_ref_no.strip()
+    p.sdl_ref_no = payload.sdl_ref_no.strip()
+    p.uif_ref_no = payload.uif_ref_no.strip()
     p.currency = payload.currency.strip().upper() or "USD"
+    incoming_logo = (payload.logo_data_url or "").strip()
+    if incoming_logo:
+        p.logo_data_url = incoming_logo
     db.commit()
     db.refresh(p)
     return {
@@ -1325,7 +1746,11 @@ def update_company_profile(payload: schemas.CompanyProfileUpdate, company_id: in
         "email": p.email,
         "phone": p.phone,
         "tax_number": p.tax_number,
+        "paye_ref_no": p.paye_ref_no,
+        "sdl_ref_no": p.sdl_ref_no,
+        "uif_ref_no": p.uif_ref_no,
         "currency": p.currency,
+        "logo_data_url": p.logo_data_url or "",
     }
 
 
@@ -1435,7 +1860,16 @@ def create_invoice(payload: schemas.InvoiceCreate, company_id: int = 1, db: Sess
     _resolve_company(db, company_id)
     _ensure_period_open(db, company_id, payload.issue_date)
 
-    customer_name = payload.customer_name.strip()
+    customer_id = payload.customer_id
+    customer_name = (payload.customer_name or "").strip()
+    if customer_id:
+        customer = db.query(models.Customer).filter(models.Customer.company_id == company_id, models.Customer.id == customer_id).first()
+        if not customer:
+            raise HTTPException(status_code=404, detail="Customer not found")
+        if not customer_name:
+            customer_name = customer.name.strip()
+        if not customer_name:
+            customer_name = customer.name.strip()
     if not customer_name:
         raise HTTPException(status_code=400, detail="customer_name is required")
     if payload.due_date < payload.issue_date:
@@ -1451,14 +1885,6 @@ def create_invoice(payload: schemas.InvoiceCreate, company_id: int = 1, db: Sess
     )
     if duplicate:
         raise HTTPException(status_code=400, detail="Invoice number already exists")
-
-    customer_id = payload.customer_id
-    if customer_id:
-        customer = db.query(models.Customer).filter(models.Customer.company_id == company_id, models.Customer.id == customer_id).first()
-        if not customer:
-            raise HTTPException(status_code=404, detail="Customer not found")
-        if not customer_name:
-            customer_name = customer.name
 
     invoice = models.Invoice(
         company_id=company_id,
@@ -2198,6 +2624,8 @@ def delete_rule(rule_id: int, company_id: int = 1, db: Session = Depends(get_db)
 def list_bank_transactions(
     company_id: int = 1,
     q: str | None = None,
+    account_id: int | None = None,
+    unassigned: bool = False,
     from_date: date | None = None,
     to_date: date | None = None,
     db: Session = Depends(get_db),
@@ -2211,6 +2639,11 @@ def list_bank_transactions(
             (models.BankTransaction.description.ilike(needle))
             | (models.BankTransaction.reference.ilike(needle))
         )
+
+    if unassigned:
+        query = query.filter(models.BankTransaction.assigned_account_id.is_(None))
+    elif account_id:
+        query = query.filter(models.BankTransaction.assigned_account_id == account_id)
 
     if from_date:
         query = query.filter(models.BankTransaction.txn_date >= from_date)
@@ -2716,6 +3149,7 @@ def create_payroll_employee(payload: schemas.PayrollEmployeeCreate, company_id: 
         full_name=name,
         initials=payload.initials.strip(),
         surname=payload.surname.strip(),
+        date_of_birth=payload.date_of_birth,
         address=payload.address.strip(),
         nationality=payload.nationality.strip(),
         photo_url=payload.photo_url.strip(),
@@ -2784,6 +3218,7 @@ def update_payroll_employee(
     employee.full_name = name
     employee.initials = payload.initials.strip()
     employee.surname = payload.surname.strip()
+    employee.date_of_birth = payload.date_of_birth
     employee.address = payload.address.strip()
     employee.nationality = payload.nationality.strip()
     employee.photo_url = payload.photo_url.strip()
@@ -2873,6 +3308,10 @@ def _payroll_run_out(run: models.PayrollRun) -> schemas.PayrollRunOut:
         pension_rate=float(run.pension_rate or 0.0),
         sdl_rate=float(run.sdl_rate or 0.0),
         other_deduction_per_employee=float(run.other_deduction_per_employee or 0.0),
+        financial_year_label=str(run.financial_year_label or ""),
+        provident_employee_rate=float(run.provident_employee_rate or 0.0),
+        provident_employer_rate=float(run.provident_employer_rate or 0.0),
+        provident_locked=bool(run.provident_locked),
         provident_mode=str(run.provident_mode or "fixed_amount"),
         provident_value=float(run.provident_value or 0.0),
         provident_scope=str(run.provident_scope or "employee"),
@@ -2904,6 +3343,10 @@ def _payroll_run_detail(run: models.PayrollRun) -> dict:
         "pension_rate": float(run.pension_rate or 0.0),
         "sdl_rate": float(run.sdl_rate or 0.0),
         "other_deduction_per_employee": float(run.other_deduction_per_employee or 0.0),
+        "financial_year_label": str(run.financial_year_label or ""),
+        "provident_employee_rate": float(run.provident_employee_rate or 0.0),
+        "provident_employer_rate": float(run.provident_employer_rate or 0.0),
+        "provident_locked": bool(run.provident_locked),
         "provident_mode": str(run.provident_mode or "fixed_amount"),
         "provident_value": float(run.provident_value or 0.0),
         "provident_scope": str(run.provident_scope or "employee"),
@@ -2919,6 +3362,7 @@ def _payroll_run_detail(run: models.PayrollRun) -> dict:
                 "employee_id": ln.employee_id,
                 "employee_code": ln.employee.employee_code,
                 "employee_name": ln.employee.full_name,
+                "basic_pay": float(ln.basic_pay or 0.0),
                 "gross_pay": float(ln.gross_pay or 0.0),
                 "tax_amount": float(ln.tax_amount or 0.0),
                 "nssa_amount": float(ln.nssa_amount or 0.0),
@@ -2927,6 +3371,9 @@ def _payroll_run_detail(run: models.PayrollRun) -> dict:
                 "sdl_amount": float(ln.sdl_amount or 0.0),
                 "total_deductions": float(ln.total_deductions or 0.0),
                 "net_pay": float(ln.net_pay or 0.0),
+                "provident_employee_rate": float(ln.provident_employee_rate or 0.0),
+                "provident_employer_rate": float(ln.provident_employer_rate or 0.0),
+                "components": json.loads(ln.deductions_json or "[]") if (ln.deductions_json or "").strip() else [],
             }
             for ln in (run.lines or [])
         ],
@@ -2974,7 +3421,13 @@ def payroll_employee_detail(employee_id: int, company_id: int = 1, db: Session =
             "status": run.status,
             "gross_pay": float(line.gross_pay or 0.0),
             "tax_amount": float(line.tax_amount or 0.0),
+            "nssa_amount": float(line.nssa_amount or 0.0),
+            "pension_amount": float(line.pension_amount or 0.0),
+            "other_deduction": float(line.other_deduction or 0.0),
+            "sdl_amount": float(line.sdl_amount or 0.0),
+            "total_deductions": float(line.total_deductions or 0.0),
             "net_pay": float(line.net_pay or 0.0),
+            "components": json.loads(line.deductions_json or "[]") if (line.deductions_json or "").strip() else [],
         }
         for line, run in lines
     ]
@@ -3157,13 +3610,21 @@ async def preview_payroll_import(
         except ValueError as exc:
             raise HTTPException(status_code=400, detail="pay_date must be in YYYY-MM-DD format") from exc
 
+    resolved_period_label = (period_label or "").strip()
+    if not resolved_period_label:
+        resolved_period_label = _month_period_from_date(parsed_pay_date) or _extract_period_from_title(parsed.get("title") or "")
+    if not resolved_period_label:
+        resolved_period_label = parsed.get("title") or "Payroll Import"
+
+    resolved_financial_year = (financial_year_label or "").strip() or _financial_year_from_date(parsed_pay_date)
+
     batch = models.PayrollImportBatch(
         company_id=company_id,
         source_filename=file.filename or "payroll.csv",
         title=parsed.get("title") or "Payroll Import",
-        period_label=(period_label or "").strip() or (parsed.get("title") or "Payroll Import"),
+        period_label=resolved_period_label,
         pay_date=parsed_pay_date,
-        financial_year_label=(financial_year_label or "").strip(),
+        financial_year_label=resolved_financial_year,
         status="preview",
         currency="ZAR",
         raw_headers_json=json.dumps(parsed.get("header") or []),
@@ -3341,24 +3802,34 @@ def create_payroll_run_from_import(
     if payload.tax_liability_account_id and not tax_account:
         raise HTTPException(status_code=404, detail="Tax liability account not found")
 
-    effective_period = (payload.period_label or "").strip() or batch.period_label or batch.title or "Payroll Import"
-    fy_label = (payload.financial_year_label or "").strip() or batch.financial_year_label
+    effective_pay_date = payload.pay_date or batch.pay_date or date.today()
+    effective_period = (payload.period_label or "").strip() or batch.period_label or _month_period_from_date(effective_pay_date) or batch.title or "Payroll Import"
+    fy_label = (payload.financial_year_label or "").strip() or batch.financial_year_label or _financial_year_from_date(effective_pay_date)
     if fy_label:
         effective_period = f"{effective_period} | FY {fy_label}"
+
+    policy = _get_provident_policy(db, company_id, fy_label)
+    use_policy = bool(policy and policy.locked)
+    policy_employee_rate = float(policy.employee_rate or 0.0) if policy else 0.0
+    policy_employer_rate = float(policy.employer_rate or 0.0) if policy else 0.0
 
     run = models.PayrollRun(
         company_id=company_id,
         period_label=effective_period,
-        pay_date=payload.pay_date or batch.pay_date or date.today(),
+        pay_date=effective_pay_date,
         status="draft",
         paye_rate=0.0,
         nssa_rate=0.0,
         pension_rate=0.0,
         sdl_rate=0.0,
         other_deduction_per_employee=0.0,
+        financial_year_label=fy_label,
         provident_mode="fixed_amount",
         provident_value=0.0,
         provident_scope="employee",
+        provident_employee_rate=policy_employee_rate,
+        provident_employer_rate=policy_employer_rate,
+        provident_locked=use_policy,
         expense_account_id=payload.expense_account_id,
         payable_account_id=payload.payable_account_id,
         tax_liability_account_id=payload.tax_liability_account_id,
@@ -3377,9 +3848,36 @@ def create_payroll_run_from_import(
     }
 
     for ln in lines:
-        gross_pay = round(float(ln.total_earnings or ln.basic_salary or 0.0), 2)
-        tax_amount = round(float(ln.tax_amount or 0.0), 2)
+        basic_pay = round(float(ln.basic_salary or ln.total_earnings or 0.0), 2)
+        gross_pay = round(float(ln.total_earnings or basic_pay or 0.0), 2)
+        matched_emp = (
+            db.query(models.PayrollEmployee)
+            .filter(models.PayrollEmployee.company_id == company_id, models.PayrollEmployee.id == ln.matched_employee_id)
+            .first()
+        )
+        derived_dob = (matched_emp.date_of_birth if matched_emp else None) or _extract_date_of_birth_from_id_number(
+            matched_emp.id_number if matched_emp else ""
+        )
+        table_tax = _lookup_paye_from_table(
+            db=db,
+            company_id=company_id,
+            pay_date_value=effective_pay_date,
+            monthly_remuneration=basic_pay,
+            employee_dob=derived_dob,
+        )
+        tax_amount = round(float(table_tax if table_tax is not None else (ln.tax_amount or 0.0)), 2)
         pension_amount = round(float(ln.provident_fund or 0.0), 2)
+        company_provident_amount = round(float(ln.company_provident_fund or 0.0), 2)
+
+        if use_policy:
+            pension_amount_new = round(basic_pay * policy_employee_rate / 100.0, 2)
+            company_provident_new = round(basic_pay * policy_employer_rate / 100.0, 2)
+            delta_pension = round(pension_amount_new - pension_amount, 2)
+            pension_amount = pension_amount_new
+            company_provident_amount = company_provident_new
+        else:
+            delta_pension = 0.0
+
         other_deduction = round(
             max(
                 float(ln.total_deductions or 0.0) - tax_amount - pension_amount,
@@ -3393,12 +3891,19 @@ def create_payroll_run_from_import(
         )
         total_deductions = round(float(ln.total_deductions or (tax_amount + pension_amount + other_deduction)), 2)
         net_pay = round(float(ln.net_pay or max(gross_pay - total_deductions, 0.0)), 2)
+        if use_policy:
+            total_deductions = round(total_deductions + delta_pension, 2)
+            gross_pay = round(gross_pay + delta_pension, 2)
+            net_pay = round(float(ln.net_pay or net_pay), 2)
+
+        line_emp_rate = policy_employee_rate if use_policy else float((matched_emp.provident_fund_employee_rate if matched_emp else 0.0) or 0.0)
+        line_employer_rate = policy_employer_rate if use_policy else float((matched_emp.provident_fund_employer_rate if matched_emp else 0.0) or 0.0)
 
         components = [
             {"name": "Tax", "scope": "employee", "calculation_type": "fixed_amount", "value": tax_amount, "amount": tax_amount},
             {"name": "Admin Levy", "scope": "employee", "calculation_type": "fixed_amount", "value": float(ln.admin_levy or 0.0), "amount": float(ln.admin_levy or 0.0)},
             {"name": "UIF", "scope": "employee", "calculation_type": "fixed_amount", "value": float(ln.uif_amount or 0.0), "amount": float(ln.uif_amount or 0.0)},
-            {"name": "Provident Fund", "scope": "employee", "calculation_type": "fixed_amount", "value": pension_amount, "amount": pension_amount},
+            {"name": "Provident Fund", "scope": "employee", "calculation_type": "percentage_of_basic" if (use_policy or line_emp_rate > 0) else "fixed_amount", "value": line_emp_rate if (use_policy or line_emp_rate > 0) else pension_amount, "amount": pension_amount},
             {"name": "Medical Insurance", "scope": "employee", "calculation_type": "fixed_amount", "value": float(ln.medical_insurance or 0.0), "amount": float(ln.medical_insurance or 0.0)},
             {"name": "Sick Pay", "scope": "employee", "calculation_type": "fixed_amount", "value": float(ln.sick_pay or 0.0), "amount": float(ln.sick_pay or 0.0)},
             {"name": "Other", "scope": "employee", "calculation_type": "fixed_amount", "value": float(ln.other_deduction or 0.0), "amount": float(ln.other_deduction or 0.0)},
@@ -3406,13 +3911,14 @@ def create_payroll_run_from_import(
             {"name": "Company Admin Levy", "scope": "employer", "calculation_type": "fixed_amount", "value": float(ln.company_admin_levy or 0.0), "amount": float(ln.company_admin_levy or 0.0)},
             {"name": "Company Medical Aid", "scope": "employer", "calculation_type": "fixed_amount", "value": float(ln.company_medical_aid or 0.0), "amount": float(ln.company_medical_aid or 0.0)},
             {"name": "Company Sick Pay", "scope": "employer", "calculation_type": "fixed_amount", "value": float(ln.company_sick_pay or 0.0), "amount": float(ln.company_sick_pay or 0.0)},
-            {"name": "Company Provident Fund", "scope": "employer", "calculation_type": "fixed_amount", "value": float(ln.company_provident_fund or 0.0), "amount": float(ln.company_provident_fund or 0.0)},
+            {"name": "Company Provident Fund", "scope": "employer", "calculation_type": "percentage_of_basic" if (use_policy or line_employer_rate > 0) else "fixed_amount", "value": line_employer_rate if (use_policy or line_employer_rate > 0) else company_provident_amount, "amount": company_provident_amount},
         ]
 
         db.add(
             models.PayrollRunLine(
                 payroll_run_id=run.id,
                 employee_id=ln.matched_employee_id,
+                basic_pay=basic_pay,
                 gross_pay=gross_pay,
                 tax_amount=tax_amount,
                 nssa_amount=0.0,
@@ -3422,7 +3928,14 @@ def create_payroll_run_from_import(
                 total_deductions=total_deductions,
                 net_pay=net_pay,
                 employee_deductions_total=total_deductions,
-                employer_contributions_total=float(ln.total_company_contributions or 0.0),
+                employer_contributions_total=round(
+                    float(ln.total_company_contributions or 0.0)
+                    - float(ln.company_provident_fund or 0.0)
+                    + company_provident_amount,
+                    2,
+                ),
+                provident_employee_rate=line_emp_rate,
+                provident_employer_rate=line_employer_rate,
                 deductions_json=json.dumps(components),
             )
         )
@@ -3728,6 +4241,203 @@ def replace_payroll_tax_brackets(payload: schemas.PayrollTaxBracketsUpdate, comp
     return list_payroll_tax_brackets(company_id=company_id, db=db)
 
 
+@app.get("/payroll/provident-policy", response_model=schemas.PayrollProvidentPolicyOut)
+def get_payroll_provident_policy(
+    company_id: int = 1,
+    financial_year_label: str | None = None,
+    pay_date: date | None = None,
+    db: Session = Depends(get_db),
+):
+    _resolve_company(db, company_id)
+    fy_label = (financial_year_label or "").strip() or _financial_year_from_date(pay_date)
+    if not fy_label:
+        raise HTTPException(status_code=400, detail="Provide financial_year_label or pay_date")
+
+    policy = _get_provident_policy(db, company_id, fy_label)
+    if not policy:
+        return schemas.PayrollProvidentPolicyOut(
+            financial_year_label=fy_label,
+            employee_rate=0.0,
+            employer_rate=0.0,
+            locked=False,
+        )
+
+    return schemas.PayrollProvidentPolicyOut(
+        financial_year_label=policy.financial_year_label,
+        employee_rate=float(policy.employee_rate or 0.0),
+        employer_rate=float(policy.employer_rate or 0.0),
+        locked=bool(policy.locked),
+    )
+
+
+@app.post("/payroll/provident-policy", response_model=schemas.PayrollProvidentPolicyOut)
+def upsert_payroll_provident_policy(
+    payload: schemas.PayrollProvidentPolicyUpdate,
+    company_id: int = 1,
+    db: Session = Depends(get_db),
+):
+    _resolve_company(db, company_id)
+    fy_label = (payload.financial_year_label or "").strip()
+    if not fy_label:
+        raise HTTPException(status_code=400, detail="financial_year_label is required")
+    if not _parse_financial_year_bounds(fy_label):
+        raise HTTPException(status_code=400, detail="financial_year_label must be in YYYY/YYYY format")
+
+    employee_rate = float(payload.employee_rate or 0.0)
+    employer_rate = float(payload.employer_rate or 0.0)
+    if employee_rate < 0 or employee_rate > 100 or employer_rate < 0 or employer_rate > 100:
+        raise HTTPException(status_code=400, detail="Provident rates must be between 0 and 100")
+
+    policy = _get_provident_policy(db, company_id, fy_label)
+    if not policy:
+        policy = models.PayrollProvidentPolicy(
+            company_id=company_id,
+            financial_year_label=fy_label,
+            employee_rate=employee_rate,
+            employer_rate=employer_rate,
+            locked=bool(payload.locked),
+        )
+        db.add(policy)
+    else:
+        policy.employee_rate = employee_rate
+        policy.employer_rate = employer_rate
+        policy.locked = bool(payload.locked)
+
+    if payload.apply_to_existing_runs:
+        bounds = _parse_financial_year_bounds(fy_label)
+        if bounds is not None:
+            start_date, end_date = bounds
+            runs = (
+                db.query(models.PayrollRun)
+                .filter(
+                    models.PayrollRun.company_id == company_id,
+                    models.PayrollRun.pay_date >= start_date,
+                    models.PayrollRun.pay_date <= end_date,
+                )
+                .all()
+            )
+            for run in runs:
+                run.financial_year_label = fy_label
+                run.provident_locked = bool(payload.locked)
+                _apply_provident_policy_to_run(
+                    run,
+                    employee_rate=employee_rate,
+                    employer_rate=employer_rate,
+                    keep_net_unchanged=True,
+                )
+
+    db.commit()
+    return schemas.PayrollProvidentPolicyOut(
+        financial_year_label=fy_label,
+        employee_rate=employee_rate,
+        employer_rate=employer_rate,
+        locked=bool(payload.locked),
+    )
+
+
+@app.post("/payroll/paye-tables/import", response_model=schemas.PayrollPayeTableBatchImportOut)
+async def import_payroll_paye_tables(
+    files: list[UploadFile] = File(...),
+    company_id: int = 1,
+    db: Session = Depends(get_db),
+):
+    _resolve_company(db, company_id)
+    if not files:
+        raise HTTPException(status_code=400, detail="Upload at least one PDF")
+
+    uploads: list[schemas.PayrollPayeTableImportOut] = []
+    failed_files: list[str] = []
+    for file in files:
+        filename = file.filename or "paye-table.pdf"
+        if not str(filename).lower().endswith(".pdf"):
+            failed_files.append(f"{filename}: file is not a PDF")
+            continue
+        raw = await file.read()
+        try:
+            effective_date, tax_year_label, revision, rows = _parse_paye_pdf_content(raw)
+        except Exception as exc:
+            failed_files.append(f"{filename}: could not parse PDF")
+            continue
+
+        if not rows:
+            failed_files.append(f"{filename}: no PAYE deduction rows found")
+            continue
+
+        upload = models.PayrollPayeTableUpload(
+            company_id=company_id,
+            source_filename=filename,
+            effective_date=effective_date,
+            tax_year_label=tax_year_label,
+            revision=revision,
+        )
+        db.add(upload)
+        db.flush()
+
+        for row in rows:
+            db.add(
+                models.PayrollPayeTableRow(
+                    upload_id=upload.id,
+                    remuneration_from=float(row.get("remuneration_from") or 0.0),
+                    remuneration_to=float(row.get("remuneration_to") or 0.0),
+                    annual_equivalent=float(row.get("annual_equivalent") or 0.0),
+                    tax_under_65=float(row.get("tax_under_65") or 0.0),
+                    tax_65_to_74=float(row.get("tax_65_to_74") or 0.0),
+                    tax_over_75=float(row.get("tax_over_75") or 0.0),
+                )
+            )
+
+        uploads.append(
+            schemas.PayrollPayeTableImportOut(
+                upload_id=upload.id,
+                source_filename=upload.source_filename,
+                effective_date=upload.effective_date,
+                tax_year_label=upload.tax_year_label,
+                row_count=len(rows),
+            )
+        )
+
+    if not uploads:
+        detail = "No PAYE tables imported"
+        if failed_files:
+            detail = f"{detail}. " + " | ".join(failed_files)
+        raise HTTPException(status_code=400, detail=detail)
+
+    db.commit()
+    return schemas.PayrollPayeTableBatchImportOut(
+        imported_files=len(uploads),
+        uploads=uploads,
+        failed_files=failed_files,
+    )
+
+
+@app.get("/payroll/paye-tables/latest")
+def latest_payroll_paye_table(company_id: int = 1, db: Session = Depends(get_db)):
+    _resolve_company(db, company_id)
+    latest = (
+        db.query(models.PayrollPayeTableUpload)
+        .filter(models.PayrollPayeTableUpload.company_id == company_id)
+        .order_by(models.PayrollPayeTableUpload.uploaded_at.desc(), models.PayrollPayeTableUpload.id.desc())
+        .first()
+    )
+    if not latest:
+        raise HTTPException(status_code=404, detail="No PAYE tables imported yet")
+    row_count = (
+        db.query(func.count(models.PayrollPayeTableRow.id))
+        .filter(models.PayrollPayeTableRow.upload_id == latest.id)
+        .scalar()
+        or 0
+    )
+    return {
+        "upload_id": latest.id,
+        "source_filename": latest.source_filename,
+        "effective_date": latest.effective_date,
+        "tax_year_label": latest.tax_year_label,
+        "revision": latest.revision,
+        "row_count": int(row_count),
+        "uploaded_at": latest.uploaded_at,
+    }
+
+
 @app.post("/payroll/runs", response_model=schemas.PayrollRunOut)
 def create_payroll_run(payload: schemas.PayrollRunCreate, company_id: int = 1, db: Session = Depends(get_db)):
     _resolve_company(db, company_id)
@@ -3779,28 +4489,60 @@ def create_payroll_run(payload: schemas.PayrollRunCreate, company_id: int = 1, d
     pension_rate = float(payload.pension_rate or 0.0)
     sdl_rate = float(payload.sdl_rate or 0.0)
     other_deduction_per_employee = float(payload.other_deduction_per_employee or 0.0)
+    financial_year_label = (payload.financial_year_label or "").strip() or _financial_year_from_date(payload.pay_date)
+    provided_emp_prov_rate = float(payload.provident_employee_rate or 0.0)
+    provided_employer_prov_rate = float(payload.provident_employer_rate or 0.0)
     provident_mode = str(payload.provident_mode or "fixed_amount").strip().lower()
     provident_scope = str(payload.provident_scope or "employee").strip().lower()
     provident_value = float(payload.provident_value or 0.0)
+
+    if financial_year_label and not _parse_financial_year_bounds(financial_year_label):
+        raise HTTPException(status_code=400, detail="financial_year_label must be in YYYY/YYYY format")
 
     for rate_name, rate_value in {
         "paye_rate": paye_rate_default,
         "nssa_rate": nssa_rate,
         "pension_rate": pension_rate,
         "sdl_rate": sdl_rate,
+        "provident_employee_rate": provided_emp_prov_rate,
+        "provident_employer_rate": provided_employer_prov_rate,
     }.items():
         if rate_value is not None and (rate_value < 0 or rate_value > 100):
             raise HTTPException(status_code=400, detail=f"{rate_name} must be between 0 and 100")
     if other_deduction_per_employee < 0:
         raise HTTPException(status_code=400, detail="other_deduction_per_employee must be >= 0")
-    if provident_mode not in {"fixed_amount", "percentage_of_gross"}:
-        raise HTTPException(status_code=400, detail="provident_mode must be 'fixed_amount' or 'percentage_of_gross'")
+    if provident_mode not in {"fixed_amount", "percentage_of_gross", "percentage_of_basic"}:
+        raise HTTPException(status_code=400, detail="provident_mode must be 'fixed_amount', 'percentage_of_gross', or 'percentage_of_basic'")
     if provident_scope not in {"employee", "employer", "both"}:
         raise HTTPException(status_code=400, detail="provident_scope must be employee, employer, or both")
     if provident_value < 0:
         raise HTTPException(status_code=400, detail="provident_value must be >= 0")
     if provident_mode == "percentage_of_gross" and provident_value > 100:
         raise HTTPException(status_code=400, detail="provident_value must be between 0 and 100 for percentage mode")
+
+    locked_policy = _get_provident_policy(db, company_id, financial_year_label)
+    use_locked_policy = bool(locked_policy and locked_policy.locked)
+    locked_employee_rate = float(locked_policy.employee_rate or 0.0) if locked_policy else 0.0
+    locked_employer_rate = float(locked_policy.employer_rate or 0.0) if locked_policy else 0.0
+
+    global_emp_rate = locked_employee_rate if use_locked_policy else provided_emp_prov_rate
+    global_employer_rate = locked_employer_rate if use_locked_policy else provided_employer_prov_rate
+
+    if payload.lock_provident_for_year and financial_year_label:
+        if not locked_policy:
+            locked_policy = models.PayrollProvidentPolicy(
+                company_id=company_id,
+                financial_year_label=financial_year_label,
+                employee_rate=global_emp_rate,
+                employer_rate=global_employer_rate,
+                locked=True,
+            )
+            db.add(locked_policy)
+        else:
+            locked_policy.employee_rate = global_emp_rate
+            locked_policy.employer_rate = global_employer_rate
+            locked_policy.locked = True
+        use_locked_policy = True
 
     run = models.PayrollRun(
         company_id=company_id,
@@ -3812,9 +4554,13 @@ def create_payroll_run(payload: schemas.PayrollRunCreate, company_id: int = 1, d
         pension_rate=pension_rate,
         sdl_rate=sdl_rate,
         other_deduction_per_employee=other_deduction_per_employee,
-        provident_mode=provident_mode,
+        financial_year_label=financial_year_label,
+        provident_mode="percentage_of_basic" if (global_emp_rate > 0 or global_employer_rate > 0) else provident_mode,
         provident_value=provident_value,
         provident_scope=provident_scope,
+        provident_employee_rate=global_emp_rate,
+        provident_employer_rate=global_employer_rate,
+        provident_locked=use_locked_policy,
         expense_account_id=payload.expense_account_id,
         payable_account_id=payload.payable_account_id,
         tax_liability_account_id=payload.tax_liability_account_id,
@@ -3830,16 +4576,34 @@ def create_payroll_run(payload: schemas.PayrollRunCreate, company_id: int = 1, d
     total_sdl = 0.0
     total_net = 0.0
     for emp in employees:
-        gross = round(float(emp.default_gross_salary or 0.0), 2)
+        basic_pay = round(float(emp.default_gross_salary or 0.0), 2)
+        gross = basic_pay
         paye_rate = float(paye_rate_default if paye_rate_default is not None else (emp.tax_rate or 0.0))
-        tax = round(gross * paye_rate / 100.0, 2) if paye_rate_default is not None else _compute_progressive_tax(gross, tax_brackets)
+        derived_dob = emp.date_of_birth or _extract_date_of_birth_from_id_number(emp.id_number)
+        table_tax = _lookup_paye_from_table(
+            db=db,
+            company_id=company_id,
+            pay_date_value=payload.pay_date,
+            monthly_remuneration=basic_pay,
+            employee_dob=derived_dob,
+        )
+        if paye_rate_default is not None:
+            tax = round(gross * paye_rate / 100.0, 2)
+        elif table_tax is not None:
+            tax = round(table_tax, 2)
+        else:
+            tax = _compute_progressive_tax(gross, tax_brackets)
         nssa_amount = round(gross * nssa_rate / 100.0, 2)
+        line_emp_rate = global_emp_rate if (global_emp_rate > 0 or use_locked_policy) else float(emp.provident_fund_employee_rate or 0.0)
+        line_employer_rate = global_employer_rate if (global_employer_rate > 0 or use_locked_policy) else float(emp.provident_fund_employer_rate or 0.0)
         pension_amount = round(gross * pension_rate / 100.0, 2)
+        if line_emp_rate > 0:
+            pension_amount = round(basic_pay * line_emp_rate / 100.0, 2)
         sdl_amount = round(gross * sdl_rate / 100.0, 2)
         base_other_deduction = round(other_deduction_per_employee, 2)
 
         employee_rules: list[dict] = []
-        if provident_value > 0:
+        if provident_value > 0 and not (line_emp_rate > 0 or line_employer_rate > 0):
             employee_rules.append(
                 {
                     "name": "Provident Fund (Run)",
@@ -3866,13 +4630,13 @@ def create_payroll_run(payload: schemas.PayrollRunCreate, company_id: int = 1, d
                     "value": float(emp.sick_fund_amount or 0.0),
                 }
             )
-        if float(emp.provident_fund_employee_rate or 0.0) > 0:
+        if line_emp_rate > 0:
             employee_rules.append(
                 {
                     "name": "Provident Fund (Employee)",
                     "scope": "employee",
-                    "calculation_type": "percentage_of_gross",
-                    "value": float(emp.provident_fund_employee_rate or 0.0),
+                    "calculation_type": "percentage_of_basic",
+                    "value": line_emp_rate,
                 }
             )
         if float(emp.other_deduction_amount or 0.0) > 0:
@@ -3893,13 +4657,13 @@ def create_payroll_run(payload: schemas.PayrollRunCreate, company_id: int = 1, d
                     "value": float(emp.medical_aid_employer_amount or 0.0),
                 }
             )
-        if float(emp.provident_fund_employer_rate or 0.0) > 0:
+        if line_employer_rate > 0:
             employee_rules.append(
                 {
                     "name": "Provident Fund (Employer)",
                     "scope": "employer",
-                    "calculation_type": "percentage_of_gross",
-                    "value": float(emp.provident_fund_employer_rate or 0.0),
+                    "calculation_type": "percentage_of_basic",
+                    "value": line_employer_rate,
                 }
             )
 
@@ -3924,6 +4688,7 @@ def create_payroll_run(payload: schemas.PayrollRunCreate, company_id: int = 1, d
         line = models.PayrollRunLine(
             payroll_run_id=run.id,
             employee_id=emp.id,
+            basic_pay=basic_pay,
             gross_pay=gross,
             tax_amount=tax,
             nssa_amount=nssa_amount,
@@ -3934,6 +4699,8 @@ def create_payroll_run(payload: schemas.PayrollRunCreate, company_id: int = 1, d
             net_pay=net,
             employee_deductions_total=total_deductions,
             employer_contributions_total=employer_contributions_total,
+            provident_employee_rate=line_emp_rate,
+            provident_employer_rate=line_employer_rate,
             deductions_json=json.dumps(components.get("components") or []),
         )
         db.add(line)
@@ -3952,6 +4719,31 @@ def create_payroll_run(payload: schemas.PayrollRunCreate, company_id: int = 1, d
     run.total_other_deductions = round(total_other_deductions, 2)
     run.total_sdl = round(total_sdl, 2)
     run.total_net = round(total_net, 2)
+
+    if payload.apply_provident_to_year_runs and financial_year_label:
+        bounds = _parse_financial_year_bounds(financial_year_label)
+        if bounds is not None:
+            start_date, end_date = bounds
+            year_runs = (
+                db.query(models.PayrollRun)
+                .filter(
+                    models.PayrollRun.company_id == company_id,
+                    models.PayrollRun.pay_date >= start_date,
+                    models.PayrollRun.pay_date <= end_date,
+                    models.PayrollRun.id != run.id,
+                )
+                .all()
+            )
+            for year_run in year_runs:
+                year_run.financial_year_label = financial_year_label
+                year_run.provident_locked = bool(payload.lock_provident_for_year or use_locked_policy)
+                _apply_provident_policy_to_run(
+                    year_run,
+                    employee_rate=run.provident_employee_rate,
+                    employer_rate=run.provident_employer_rate,
+                    keep_net_unchanged=True,
+                )
+
     db.commit()
     db.refresh(run)
     return _payroll_run_out(run)
@@ -4205,6 +4997,72 @@ def payroll_tax_certificate_download(run_id: int, employee_id: int, company_id: 
     employee_line = next((ln for ln in detail.get("lines", []) if ln.get("employee_id") == employee_id), None)
     if not employee_line:
         raise HTTPException(status_code=404, detail="Tax certificate employee line not found")
+
+    emp = (
+        db.query(models.PayrollEmployee)
+        .filter(models.PayrollEmployee.company_id == company_id, models.PayrollEmployee.id == employee_id)
+        .first()
+    )
+    if emp:
+        employee_line["employee"] = {
+            "full_name": emp.full_name,
+            "initials": emp.initials,
+            "surname": emp.surname,
+            "date_of_birth": emp.date_of_birth,
+            "hire_date": emp.hire_date,
+            "address": emp.address,
+            "id_number": emp.id_number,
+            "tax_number": emp.tax_number,
+            "email": emp.email,
+            "bank_account": emp.bank_account,
+            "bank_name": emp.bank_name,
+            "bank_branch": emp.bank_branch,
+            "bank_account_type": emp.bank_account_type,
+        }
+
+    fy_label = str(run.financial_year_label or "").strip() or _financial_year_from_date(run.pay_date)
+    bounds = _parse_financial_year_bounds(fy_label)
+    months_worked = 0
+    total_paye_year = 0.0
+    period_employed_from = ""
+    period_employed_to = ""
+    periods_in_year = 12.0
+    if bounds is not None:
+        fy_start, fy_end = bounds
+        period_start = fy_start
+        if emp and emp.hire_date and emp.hire_date > fy_start:
+            period_start = emp.hire_date
+        period_end = fy_end
+        period_employed_from = period_start.isoformat().replace("-", "/")
+        period_employed_to = period_end.isoformat().replace("-", "/")
+
+        history_lines = (
+            db.query(models.PayrollRunLine, models.PayrollRun)
+            .join(models.PayrollRun, models.PayrollRun.id == models.PayrollRunLine.payroll_run_id)
+            .filter(
+                models.PayrollRun.company_id == company_id,
+                models.PayrollRunLine.employee_id == employee_id,
+                models.PayrollRun.pay_date >= period_start,
+                models.PayrollRun.pay_date <= period_end,
+            )
+            .all()
+        )
+        months_worked = len(history_lines)
+        total_paye_year = round(sum(float(line.tax_amount or 0.0) for line, _ in history_lines), 2)
+        month_span = max(((period_end.year - period_start.year) * 12 + (period_end.month - period_start.month) + 1), 1)
+        periods_in_year = float(min(12, month_span))
+
+    if months_worked > 0:
+        employee_line["tax_amount"] = round(total_paye_year / months_worked, 2)
+    employee_line["irp5_meta"] = {
+        "financial_year_label": fy_label,
+        "months_worked": float(months_worked),
+        "periods_in_year": periods_in_year,
+        "period_employed_from": period_employed_from,
+        "period_employed_to": period_employed_to,
+        "total_paye_year": total_paye_year,
+        "average_paye_monthly": float(employee_line.get("tax_amount") or 0.0),
+    }
 
     profile = _get_company_profile(db, company_id)
     pdf_bytes = build_tax_certificate_pdf(detail, employee_line, _company_profile_data(profile))
