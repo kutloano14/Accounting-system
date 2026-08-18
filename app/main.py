@@ -20,7 +20,10 @@ from sqlalchemy import func
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
-from pypdf import PdfReader
+try:
+    from pypdf import PdfReader
+except ModuleNotFoundError:  # pragma: no cover - deployment fallback
+    PdfReader = None
 
 from app import models, schemas
 from app.database import Base, engine, get_db
@@ -594,6 +597,11 @@ def _age_on_date(dob: date | None, as_of: date) -> int | None:
 
 
 def _parse_paye_pdf_content(pdf_bytes: bytes) -> tuple[date | None, str, str, list[dict]]:
+    if PdfReader is None:
+        raise HTTPException(
+            status_code=500,
+            detail="PDF parsing dependency missing on server: install pypdf",
+        )
     reader = PdfReader(io.BytesIO(pdf_bytes))
     text_chunks = []
     for page in reader.pages:
