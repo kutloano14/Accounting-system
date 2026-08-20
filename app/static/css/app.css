@@ -296,6 +296,38 @@ select:focus {
   overflow: auto;
 }
 
+.transaction-summary {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0.6rem;
+  padding: 0.8rem;
+  border-bottom: 1px solid #d7dce2;
+  background: linear-gradient(180deg, #f8fbff 0%, #eef4ff 100%);
+}
+
+.transaction-summary-item {
+  padding: 0.7rem 0.75rem;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.75);
+  border: 1px solid rgba(191, 205, 223, 0.75);
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.transaction-summary-item span {
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #5b6472;
+  font-weight: 700;
+}
+
+.transaction-summary-item strong {
+  font-size: 1.05rem;
+  color: #1f2937;
+}
+
 .is-hidden {
   display: none;
 }
@@ -353,6 +385,12 @@ select:focus {
 .empty-table {
   padding: 0.8rem;
   color: #5e6a75;
+}
+
+@media (max-width: 800px) {
+  .transaction-summary {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 
 .report-period {

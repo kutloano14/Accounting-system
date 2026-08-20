@@ -274,6 +274,33 @@ function openCreateAccountForm() {
   }
 }
 
+function renderTransactionTotalsSummary(rows) {
+  const totals = rows.reduce(
+    (acc, row) => {
+      const amount = Number(row.amount || 0);
+      acc.count += 1;
+      acc.net += amount;
+      if (amount >= 0) {
+        acc.inflows += amount;
+      } else {
+        acc.outflows += Math.abs(amount);
+      }
+      return acc;
+    },
+    { count: 0, inflows: 0, outflows: 0, net: 0 }
+  );
+
+  const format = (value) => Number(value || 0).toFixed(2);
+  return `
+    <div class="transaction-summary">
+      <div class="transaction-summary-item"><span>Filtered</span><strong>${totals.count}</strong></div>
+      <div class="transaction-summary-item"><span>Inflows</span><strong>${format(totals.inflows)}</strong></div>
+      <div class="transaction-summary-item"><span>Outflows</span><strong>${format(totals.outflows)}</strong></div>
+      <div class="transaction-summary-item"><span>Net</span><strong>${format(totals.net)}</strong></div>
+    </div>
+  `;
+}
+
 function renderTransactionsTable(rows) {
   const container = byId("transactionsOut");
   if (!container) {
@@ -281,7 +308,7 @@ function renderTransactionsTable(rows) {
   }
 
   if (!rows.length) {
-    container.innerHTML = '<div class="empty-table">No transactions found.</div>';
+    container.innerHTML = `${renderTransactionTotalsSummary(rows)}<div class="empty-table">No transactions found.</div>`;
     return;
   }
 
@@ -338,7 +365,7 @@ function renderTransactionsTable(rows) {
     })
     .join("");
 
-  container.innerHTML = `<table class="friendly-table">${header}<tbody>${bodyRows}</tbody></table>`;
+  container.innerHTML = `${renderTransactionTotalsSummary(rows)}<table class="friendly-table">${header}<tbody>${bodyRows}</tbody></table>`;
 
   rows.forEach((row) => {
     const sel = byId(`txnAccount-${row.id}`);
